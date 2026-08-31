@@ -28,6 +28,7 @@ from databricks.sdk import errors
 from databricks.sdk.service.serving import (
     EndpointCoreConfigInput, ServedEntityInput, ServingModelWorkloadType,
     TrafficConfig, Route, EndpointTag, AiGatewayInferenceTableConfig,
+    AiGatewayUsageTrackingConfig,
 )
 
 # Parameters arrive as notebook widgets (set via notebook_params / job_parameters
@@ -322,10 +323,11 @@ try:
     try:
         w.serving_endpoints.put_ai_gateway(
             name=endpoint_name,
+            usage_tracking_config=AiGatewayUsageTrackingConfig(enabled=True),
             inference_table_config=AiGatewayInferenceTableConfig(
                 catalog_name=CATALOG, schema_name=SCHEMA,
                 table_name_prefix=f"{endpoint_name}_payload", enabled=True))
-        print("[deployer] inference tables enabled")
+        print("[deployer] AI Gateway: usage tracking + inference tables enabled")
     except Exception as ge:
         print(f"[deployer] AI Gateway warning (non-fatal): {ge}")
 
