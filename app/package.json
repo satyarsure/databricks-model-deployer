@@ -1,5 +1,5 @@
 {
-  "name": "satya-takeda-poc-app",
+  "name": "model-deployer",
   "version": "1.0.0",
   "main": "dist/server.js",
   "type": "module",

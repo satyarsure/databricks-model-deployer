@@ -18,3 +18,5 @@ resources:
             base_parameters:
               deploy_spec: "{}"
               deployment_id: "-1"
+              catalog: ${var.catalog}
+              schema: ${var.schema}

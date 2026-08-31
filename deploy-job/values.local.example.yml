@@ -1,0 +1,12 @@
+# Copy to values.local.yml (gitignored) and fill in your deployment's real values.
+# This file is merged into databricks.yml via the `include` glob at deploy time.
+targets:
+  dev:
+    workspace:
+      root_path: /Workspace/Users/<you>@example.com/<folder>/deploy-job
+    variables:
+      catalog: <your_catalog>
+      schema: <your_schema>
+      budget_policy_id: <your-serverless-budget-policy-id>
+      cost_center: <your_cost_center>
+      team: <your_team>

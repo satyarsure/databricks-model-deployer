@@ -3,17 +3,20 @@ bundle:
 
 include:
   - resources/*.yml
+  - "*.local.yml" # gitignored per-deployment overrides (values.local.yml)
 
 variables:
   catalog:
-    default: satya_takeda_poc
+    description: UC catalog holding the status/lifecycle tables and artifacts volume
+    default: main
   schema:
-    default: mlops_test_20260829
-  # Serverless usage (budget) policy + chargeback tags applied to the deploy job.
+    description: UC schema holding the status/lifecycle tables and artifacts volume
+    default: default
   budget_policy_id:
-    default: d8946003-d2b8-42a2-bd48-478c965b506c # satya_takeda_policy
+    description: Serverless budget (usage) policy id applied to the deploy job for chargeback
+    default: ""
   cost_center:
-    default: mlops_test
+    default: mlops
   team:
     default: mlops
 
@@ -21,7 +24,6 @@ targets:
   dev:
     default: true
     mode: development
-    workspace:
-      host: https://adb-984752964297111.11.azuredatabricks.net
-      profile: DEFAULT1
-      root_path: /Workspace/Users/satyendranath.sure@databricks.com/Takeda/mlops_test_20260829/deploy-job
+    # Workspace host comes from the CLI `--profile`. The workspace root_path and
+    # the real catalog / schema / budget policy are supplied at deploy time via a
+    # gitignored values.local.yml (see values.local.example.yml).

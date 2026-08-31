@@ -1,6 +1,6 @@
 {
-  "name": "satya-takeda-poc-app",
-  "short_name": "satya-takeda-poc-app",
+  "name": "Model Deployer",
+  "short_name": "Model Deployer",
   "icons": [
     {
       "src": "/favicon-192x192.png",

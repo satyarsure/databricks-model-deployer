@@ -30,13 +30,17 @@ from databricks.sdk.service.serving import (
     TrafficConfig, Route, EndpointTag, AiGatewayInferenceTableConfig,
 )
 
-CATALOG = "satya_takeda_poc"
-SCHEMA = "mlops_test_20260829"
-TABLE = f"{CATALOG}.{SCHEMA}.model_deployments"
-
-# Parameters arrive as notebook widgets (set via notebook_params / job_parameters).
+# Parameters arrive as notebook widgets (set via notebook_params / job_parameters
+# and job base_parameters). Catalog/schema are supplied by the bundle (var.catalog /
+# var.schema) so nothing deployment-specific is hardcoded here.
 dbutils.widgets.text("deploy_spec", "{}")
 dbutils.widgets.text("deployment_id", "-1")
+dbutils.widgets.text("catalog", "main")
+dbutils.widgets.text("schema", "default")
+
+CATALOG = dbutils.widgets.get("catalog")
+SCHEMA = dbutils.widgets.get("schema")
+TABLE = f"{CATALOG}.{SCHEMA}.model_deployments"
 spec = json.loads(dbutils.widgets.get("deploy_spec"))
 deployment_id = int(dbutils.widgets.get("deployment_id"))
 try:

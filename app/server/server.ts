@@ -57,6 +57,42 @@ createApp({
   ],
   async onPluginsReady(appkit) {
     appkit.server.extend((app) => {
+      // Resolve the deployments table (catalog.schema) from the bound deploy job's
+      // notebook parameters, so nothing deployment-specific is hardcoded in the app.
+      // Falls back to env vars, then to main.default.
+      interface JobBaseParams {
+        catalog?: string;
+        schema?: string;
+      }
+      interface JobTask {
+        notebook_task?: { base_parameters?: JobBaseParams };
+      }
+      interface JobLike {
+        settings?: { tasks?: JobTask[] };
+        tasks?: JobTask[];
+      }
+      app.get('/api/config', async (_req, res) => {
+        let catalog = process.env.DEPLOYMENTS_CATALOG || 'main';
+        let schema = process.env.DEPLOYMENTS_SCHEMA || 'default';
+        try {
+          const result = await appkit.jobs('default').getJob();
+          if (result.ok) {
+            const data = result.data as JobLike;
+            const tasks = data.settings?.tasks ?? data.tasks ?? [];
+            const bp = tasks[0]?.notebook_task?.base_parameters ?? {};
+            if (bp.catalog) catalog = bp.catalog;
+            if (bp.schema) schema = bp.schema;
+          }
+        } catch {
+          // fall back to env / defaults
+        }
+        res.json({
+          catalog,
+          schema,
+          deploymentsTable: `${catalog}.${schema}.model_deployments`,
+        });
+      });
+
       // Signed-in user (for header display).
       app.get('/api/whoami', (req, res) => {
         const email =

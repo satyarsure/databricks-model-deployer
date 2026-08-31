@@ -349,7 +349,7 @@
     "command": "databricks apps init",
     "flags": {
       "--name": {
-        "description": "Project name — sets satya-takeda-poc-app in package.json, databricks.yml, and .env. Required for non-interactive scaffolding.",
+        "description": "Project name — sets the app name in package.json, databricks.yml, and .env. Required for non-interactive scaffolding.",
         "required": true,
         "pattern": "^[a-z][a-z0-9-]*$"
       },

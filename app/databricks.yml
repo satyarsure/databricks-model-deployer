@@ -1,0 +1,43 @@
+bundle:
+  name: model-deployer
+
+include:
+  - "*.local.yml" # gitignored per-deployment overrides (values.local.yml)
+
+variables:
+  app_name:
+    description: Databricks App name (must match the pre-created app)
+    default: model-deployer-app
+  sql_warehouse_id:
+    description: SQL Warehouse ID
+  job_id:
+    description: Numeric Databricks job ID for the deploy job.
+
+resources:
+  apps:
+    app:
+      name: ${var.app_name}
+      description: 'Deploy model artifacts to Databricks Model Serving'
+      source_code_path: ./
+
+      # Start the app automatically on deploy.
+      lifecycle:
+        started: true
+
+      # The resources which this app has access to.
+      resources:
+        - name: sql-warehouse
+          sql_warehouse:
+            id: ${var.sql_warehouse_id}
+            permission: CAN_USE
+        - name: job
+          job:
+            id: ${var.job_id}
+            permission: CAN_MANAGE_RUN
+
+targets:
+  default:
+    default: true
+    # Workspace host comes from the CLI `--profile`. app_name, root_path, and the
+    # warehouse/job IDs are supplied at deploy time via a gitignored values.local.yml
+    # (see values.local.example.yml).

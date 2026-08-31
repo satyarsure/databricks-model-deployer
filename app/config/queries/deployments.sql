@@ -1,3 +1,7 @@
+-- @param deployments_table STRING = main.default.model_deployments
+-- The sample value above lets type generation resolve columns at build time from a
+-- generic empty table; at runtime the app binds the real catalog.schema table via
+-- /api/config (derived from the bound deploy job's parameters).
 SELECT
   CAST(deployment_id AS STRING)      AS deployment_id,
   model_name,
@@ -26,6 +30,6 @@ SELECT
   deployed_by,
   CAST(deployed_date AS STRING)      AS deployed_date,
   CAST(updated_at AS STRING)         AS updated_at
-FROM satya_takeda_poc.mlops_test_20260829.model_deployments
+FROM IDENTIFIER(:deployments_table)
 ORDER BY deployed_date DESC NULLS LAST, updated_at DESC NULLS LAST
 LIMIT 200

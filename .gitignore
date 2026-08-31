@@ -5,7 +5,7 @@
 # Local Claude/agent config
 .claude/
 
-# Node (also covered by satya-takeda-poc-app/.gitignore)
+# Node (also covered by app/.gitignore)
 node_modules/
 dist/
 client/dist/
@@ -18,6 +18,10 @@ build/
 
 # Databricks bundle state
 .databricks/
+
+# Per-deployment bundle overrides (real workspace/catalog/schema values live here)
+*.local.yml
+values.local.yml
 
 # Test artifacts
 test-results/

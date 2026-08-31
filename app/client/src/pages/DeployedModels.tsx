@@ -4,6 +4,7 @@ import {
   Button,
   Skeleton,
 } from '@databricks/appkit-ui/react';
+import { sql } from '@databricks/appkit-ui/js';
 import { Rocket, Search, ExternalLink } from 'lucide-react';
 import type { DeploymentRow } from '../types';
 
@@ -56,14 +57,18 @@ function formatDate(v: string | null): string {
 
 function DeploymentsTable({
   search,
+  deploymentsTable,
   onRows,
   onDeployVersion,
 }: {
   search: string;
+  deploymentsTable: string;
   onRows: (rows: DeploymentRow[]) => void;
   onDeployVersion: (row: DeploymentRow) => void;
 }) {
-  const { data, loading, error } = useAnalyticsQuery('deployments', {});
+  const { data, loading, error } = useAnalyticsQuery('deployments', {
+    deployments_table: sql.string(deploymentsTable),
+  });
   const rows = (data ?? []) as DeploymentRow[];
 
   useEffect(() => {
@@ -194,6 +199,16 @@ export function DeployedModels({
   const [search, setSearch] = useState('');
   const [refreshTick, setRefreshTick] = useState(0);
   const [anyInProgress, setAnyInProgress] = useState(false);
+  const [deploymentsTable, setDeploymentsTable] = useState<string | null>(null);
+
+  // Resolve which catalog.schema.model_deployments table to read (from the server,
+  // which derives it from the bound deploy job — nothing hardcoded in the client).
+  useEffect(() => {
+    fetch('/api/config')
+      .then((r) => r.json())
+      .then((d) => setDeploymentsTable(d.deploymentsTable))
+      .catch(() => setDeploymentsTable('main.default.model_deployments'));
+  }, []);
 
   // Poll for status changes while any deployment is still running.
   useEffect(() => {
@@ -221,14 +236,23 @@ export function DeployedModels({
         </Button>
       </div>
 
-      <DeploymentsTable
-        key={refreshTick}
-        search={search}
-        onDeployVersion={onDeployVersion}
-        onRows={(rows) =>
-          setAnyInProgress(rows.some((r) => IN_PROGRESS.has(r.status ?? '')))
-        }
-      />
+      {deploymentsTable === null ? (
+        <div className="space-y-3 p-4">
+          {[0, 1, 2, 3].map((i) => (
+            <Skeleton key={i} className="h-10 w-full" />
+          ))}
+        </div>
+      ) : (
+        <DeploymentsTable
+          key={`${deploymentsTable}:${refreshTick}`}
+          search={search}
+          deploymentsTable={deploymentsTable}
+          onDeployVersion={onDeployVersion}
+          onRows={(rows) =>
+            setAnyInProgress(rows.some((r) => IN_PROGRESS.has(r.status ?? '')))
+          }
+        />
+      )}
     </div>
   );
 }

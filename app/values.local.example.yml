@@ -1,0 +1,10 @@
+# Copy to values.local.yml (gitignored) and fill in your deployment's real values.
+# Merged into databricks.yml via the `include` glob at deploy time.
+targets:
+  default:
+    workspace:
+      root_path: /Workspace/Users/<you>@example.com/<folder>/app
+    variables:
+      app_name: <your-app-name>
+      sql_warehouse_id: <warehouse-id>
+      job_id: <deploy-job-id>
