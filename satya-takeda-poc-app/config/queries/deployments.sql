@@ -1,0 +1,31 @@
+SELECT
+  CAST(deployment_id AS STRING)      AS deployment_id,
+  model_name,
+  description,
+  uc_full_name,
+  uc_catalog,
+  uc_schema,
+  uc_model,
+  model_version,
+  status,
+  stage,
+  error_message,
+  endpoint_name,
+  invoke_url,
+  experiment_name,
+  eval_dataset,
+  serverless_usage_policy,
+  tags,
+  artifacts_json,
+  input_schema_json,
+  output_schema_json,
+  compute_type,
+  gpu_type,
+  compute_size,
+  CAST(scale_to_zero AS STRING)      AS scale_to_zero,
+  deployed_by,
+  CAST(deployed_date AS STRING)      AS deployed_date,
+  CAST(updated_at AS STRING)         AS updated_at
+FROM satya_takeda_poc.mlops_test_20260829.model_deployments
+ORDER BY deployed_date DESC NULLS LAST, updated_at DESC NULLS LAST
+LIMIT 200

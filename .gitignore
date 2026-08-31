@@ -1,0 +1,25 @@
+# OS / editor
+.DS_Store
+*.swp
+
+# Local Claude/agent config
+.claude/
+
+# Node (also covered by satya-takeda-poc-app/.gitignore)
+node_modules/
+dist/
+client/dist/
+build/
+
+# Env / secrets
+.env
+*.env
+!.env.example
+
+# Databricks bundle state
+.databricks/
+
+# Test artifacts
+test-results/
+playwright-report/
+.smoke-test/

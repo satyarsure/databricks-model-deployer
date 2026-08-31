@@ -1,0 +1,20 @@
+resources:
+  jobs:
+    deploy_model_job:
+      name: mlops_deploy_model_job
+      max_concurrent_runs: 5
+
+      # Serverless usage policy + tags for cost chargeback of the deploy job.
+      budget_policy_id: ${var.budget_policy_id}
+      tags:
+        application: mlops_model_deployer
+        cost_center: ${var.cost_center}
+        team: ${var.team}
+
+      tasks:
+        - task_key: deploy_model
+          notebook_task:
+            notebook_path: ../src/notebooks/deploy_model.py
+            base_parameters:
+              deploy_spec: "{}"
+              deployment_id: "-1"
