@@ -7,8 +7,10 @@ path, an A/B traffic split, and two failure paths — every stage of
 ## 0. Prerequisites (one-time)
 
 1. **Build the fixtures.** Import `testing/setup_test_artifacts.py` as a notebook and run it
-   (serverless is fine), passing your `catalog` / `schema` / `volume` as parameters. It writes
-   these files to `/Volumes/<catalog>/<schema>/<volume>/test_models/`:
+   (serverless is fine), passing your `catalog` / `schema` / `volume` as parameters. It pins
+   `scikit-learn` / `numpy` / `pandas` / `joblib` to the same versions as the deploy job's
+   `deploy-job/requirements.txt`, so the pickles load cleanly downstream. It writes these files to
+   `/Volumes/<catalog>/<schema>/<volume>/test_models/`:
 
    | file | model | features → output |
    |---|---|---|

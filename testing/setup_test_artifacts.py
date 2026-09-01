@@ -8,7 +8,9 @@
 # MAGIC Nothing here is environment-specific — pass your catalog/schema/volume as widgets.
 
 # COMMAND ----------
-# MAGIC %pip install --quiet scikit-learn joblib pandas numpy
+# Pin the SAME versions the deploy job / serving container uses (deploy-job/requirements.txt)
+# so these fixture pickles load without a version-mismatch warning downstream.
+# MAGIC %pip install --quiet scikit-learn==1.4.2 joblib==1.4.2 pandas==2.2.2 numpy==1.26.4
 # MAGIC dbutils.library.restartPython()
 
 # COMMAND ----------

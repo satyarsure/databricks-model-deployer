@@ -9,8 +9,10 @@
 # MAGIC    tags, budget policy, inference tables).
 
 # COMMAND ----------
-# MAGIC %pip install --quiet mlflow-skinny[databricks] databricks-sdk scikit-learn pandas numpy cloudpickle joblib boto3
-dbutils.library.restartPython()
+# MAGIC %md
+# MAGIC Dependencies are **not** installed here. They come from the job's pinned serverless
+# MAGIC environment (`environment_key: locked` → `requirements.txt`), so package versions are
+# MAGIC identical on every run. To change them, edit `deploy-job/requirements.txt` and redeploy.
 
 # COMMAND ----------
 import json, os, re, traceback
@@ -26,10 +28,16 @@ from mlflow.tracking import MlflowClient
 from databricks.sdk import WorkspaceClient
 from databricks.sdk import errors
 from databricks.sdk.service.serving import (
-    EndpointCoreConfigInput, ServedEntityInput, ServingModelWorkloadType,
+    EndpointCoreConfigInput, ServedEntityInput,
     TrafficConfig, Route, EndpointTag, AiGatewayInferenceTableConfig,
     AiGatewayUsageTrackingConfig,
 )
+# The workload-type enum was renamed across SDK versions; import defensively so a future
+# databricks-sdk bump can't break this import (we pin the version in requirements.txt).
+try:
+    from databricks.sdk.service.serving import ServingModelWorkloadType
+except ImportError:
+    from databricks.sdk.service.serving import ServedModelInputWorkloadType as ServingModelWorkloadType
 
 # Parameters arrive as notebook widgets (set via notebook_params / job_parameters
 # and job base_parameters). Catalog/schema are supplied by the bundle (var.catalog /
@@ -48,6 +56,23 @@ try:
     run_id = str(dbutils.notebook.entry_point.getDbutils().notebook().getContext().jobId().get())
 except Exception:
     run_id = ""
+
+# Pin the SERVED model's environment to the exact versions in use here, so the serving
+# container (which is rebuilt from these requirements — e.g. on scale-to-zero cold starts)
+# always matches the versions the artifact was loaded/pickled with. Unpinned requirements
+# would let serving pull newer packages over time and fail to load or drift predictions.
+import importlib.metadata as _im
+def _pin(pkg):
+    try:
+        return f"{pkg}=={_im.version(pkg)}"
+    except Exception:
+        return None
+SERVED_PIP_REQUIREMENTS = [f"mlflow=={mlflow.__version__}"]
+for _p in ["scikit-learn", "pandas", "numpy", "scipy", "cloudpickle", "joblib", "xgboost", "lightgbm"]:
+    _r = _pin(_p)
+    if _r:
+        SERVED_PIP_REQUIREMENTS.append(_r)
+print("[env] served model pip_requirements:", SERVED_PIP_REQUIREMENTS)
 
 # COMMAND ----------
 def sql_escape(v):
@@ -220,7 +245,7 @@ try:
             mlflow.pyfunc.log_model(
                 artifact_path="model", python_model=wrapped, signature=sig,
                 input_example=input_example, registered_model_name=uc_full,
-                pip_requirements=["mlflow", "scikit-learn", "pandas", "numpy", "cloudpickle"],
+                pip_requirements=SERVED_PIP_REQUIREMENTS,
             )
         version = latest_version(uc_full)
         variant_versions.append({"label": label, "version": version,
@@ -318,6 +343,15 @@ try:
             kw["budget_policy_id"] = budget_policy_id
         if description:
             kw["description"] = description
+        # Drop any kwargs the installed SDK's create_and_wait doesn't accept, so an SDK
+        # version change degrades gracefully (warns) instead of raising TypeError.
+        import inspect
+        _allowed = set(inspect.signature(w.serving_endpoints.create_and_wait).parameters)
+        _dropped = [k for k in kw if k not in _allowed]
+        if _dropped:
+            print(f"[deployer] WARNING: installed databricks-sdk create_and_wait does not accept "
+                  f"{_dropped}; skipping. Pin a version that supports them (deploy-job/requirements.txt).")
+            kw = {k: v for k, v in kw.items() if k in _allowed}
         w.serving_endpoints.create_and_wait(**kw)
 
     try:

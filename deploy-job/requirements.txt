@@ -1,0 +1,16 @@
+# Locked dependency set for the deploy job's serverless environment.
+# Referenced from resources/deploy_model.job.yml (environments[].spec.dependencies: -r ...)
+# so every run uses identical package versions regardless of serverless base-image changes.
+# The Python version is pinned separately by `environment_version` in the job YAML.
+#
+# Keep this in sync with testing/setup_test_artifacts.py so fixture pickles are created
+# with the same scikit-learn/numpy/pandas the job (and serving container) will load them with.
+mlflow-skinny[databricks]==2.16.2
+databricks-sdk==0.68.0
+scikit-learn==1.4.2
+pandas==2.2.2
+numpy==1.26.4
+scipy==1.13.1
+joblib==1.4.2
+cloudpickle==3.0.0
+boto3==1.34.131

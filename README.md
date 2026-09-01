@@ -32,7 +32,29 @@ Deploy job (DABs, serverless) — one notebook, three stages:
 |------|-------------|
 | `app/` | The React/AppKit app (frontend + Express server). Deployed to Databricks Apps. |
 | `deploy-job/` | The DABs bundle for the deploy workflow job (`src/notebooks/deploy_model.py`). |
+| `deploy-job/requirements.txt` | Pinned dependency set for the job's serverless environment. |
+| `testing/` | Manual-testing fixtures (`setup_test_artifacts.py`) and guide (`README.md`). |
 | `Images/` | UI mockups. |
+
+## Reproducible dependencies (version locking)
+
+Package versions are pinned in two places so a serverless base-image change can't silently break
+a run or drift predictions:
+
+- **Deploy job** — the notebook does **no** `%pip install`. Instead the job declares a pinned
+  serverless environment (`resources/deploy_model.job.yml` → `environments[].spec`) with
+  `environment_version` (pins the Python runtime) and `-r requirements.txt` (pins every package).
+  Change versions by editing `deploy-job/requirements.txt` and redeploying — never by editing the
+  notebook.
+- **Served model** — the notebook pins the logged model's `pip_requirements` to the **exact
+  versions actually in use at wrap time** (`mlflow=={version}`, `scikit-learn==…`, etc.). Model
+  Serving rebuilds the container from these requirements (including on scale-to-zero cold starts),
+  so the serving environment always matches the versions the artifact was loaded/pickled with.
+
+Keep `testing/setup_test_artifacts.py` pinned to the same core versions as `requirements.txt` so
+fixture pickles load without a version-mismatch warning. Note: a **user-supplied** artifact must be
+compatible with the pinned `scikit-learn` (or its framework) — pin your training environment to
+match, or update `requirements.txt` to the version your artifact was trained with.
 
 ## Configuration (no environment-specific values are committed)
 

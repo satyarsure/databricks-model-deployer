@@ -13,6 +13,9 @@ resources:
 
       tasks:
         - task_key: deploy_model
+          # Pinned serverless environment (below) — locks Python + all package versions
+          # so a serverless base-image change can't break the run.
+          environment_key: locked
           notebook_task:
             notebook_path: ../src/notebooks/deploy_model.py
             base_parameters:
@@ -20,3 +23,13 @@ resources:
               deployment_id: "-1"
               catalog: ${var.catalog}
               schema: ${var.schema}
+
+      # Reproducible dependency set for serverless compute. environment_version pins the
+      # Python runtime; dependencies install the exact versions from the bundled
+      # requirements.txt (synced to ${workspace.file_path} at deploy time).
+      environments:
+        - environment_key: locked
+          spec:
+            environment_version: "2"
+            dependencies:
+              - -r ${workspace.file_path}/requirements.txt
