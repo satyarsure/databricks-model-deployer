@@ -1,14 +1,27 @@
-import { useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 import {
   useAnalyticsQuery,
   Button,
   Skeleton,
 } from '@databricks/appkit-ui/react';
 import { sql } from '@databricks/appkit-ui/js';
-import { Rocket, Search, ExternalLink } from 'lucide-react';
+import {
+  Rocket,
+  Search,
+  ExternalLink,
+  ChevronRight,
+  ChevronDown,
+} from 'lucide-react';
 import type { DeploymentRow } from '../types';
 
 const IN_PROGRESS = new Set(['IN_PROGRESS', 'VALIDATING', 'DEPLOYING']);
+
+interface LifecycleEvent {
+  stage: string | null;
+  status: string | null;
+  message: string | null;
+  event_time: string | null;
+}
 
 function StatusBadge({ status }: { status: string | null }) {
   const s = status ?? '';
@@ -55,14 +68,112 @@ function formatDate(v: string | null): string {
   });
 }
 
+function formatTime(v: string | null): string {
+  if (!v) return '';
+  const d = new Date(v.replace(' ', 'T'));
+  if (Number.isNaN(d.getTime())) return v;
+  return d.toLocaleTimeString(undefined, {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+}
+
+function eventDotClass(status: string | null): string {
+  if (status === 'COMPLETE') return 'bg-green-500';
+  if (status === 'FAILED') return 'bg-red-500';
+  if (IN_PROGRESS.has(status ?? '')) return 'bg-amber-500';
+  return 'bg-muted-foreground';
+}
+
+// Vertical timeline of a deployment's lifecycle events (wrapper -> validator -> deployer).
+function LifecycleTimeline({
+  lifecycleTable,
+  deploymentId,
+  live,
+}: {
+  lifecycleTable: string;
+  deploymentId: string;
+  live: boolean;
+}) {
+  const { data, loading, error } = useAnalyticsQuery('lifecycle', {
+    lifecycle_table: sql.string(lifecycleTable),
+    deployment_id: sql.string(deploymentId),
+  });
+  const events = (data ?? []) as LifecycleEvent[];
+
+  if (loading && events.length === 0) {
+    return (
+      <div className="p-3">
+        <Skeleton className="h-14 w-64" />
+      </div>
+    );
+  }
+  if (error) {
+    return (
+      <div className="p-3 text-xs text-destructive">Failed to load lifecycle: {error}</div>
+    );
+  }
+  if (events.length === 0) {
+    return (
+      <div className="p-3 text-xs text-muted-foreground">
+        Waiting for the first lifecycle event…
+      </div>
+    );
+  }
+
+  return (
+    <div className="px-4 py-3">
+      <div className="mb-2 flex items-center gap-2 text-xs font-medium text-muted-foreground">
+        Deployment lifecycle
+        {live && (
+          <span className="inline-flex items-center gap-1 text-amber-600 dark:text-amber-400">
+            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" />
+            live
+          </span>
+        )}
+      </div>
+      <ol className="relative ml-1 space-y-3 border-l pl-4">
+        {events.map((e, i) => (
+          <li key={i} className="relative">
+            <span
+              className={`absolute -left-[21px] top-1 h-2.5 w-2.5 rounded-full ring-2 ring-card ${eventDotClass(e.status)}`}
+            />
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-medium capitalize text-foreground">
+                {e.stage ?? '—'}
+              </span>
+              <span className="text-xs text-muted-foreground">{e.status}</span>
+              <span className="ml-auto text-xs tabular-nums text-muted-foreground">
+                {formatTime(e.event_time)}
+              </span>
+            </div>
+            {e.message && (
+              <div className="max-w-xl truncate text-xs text-muted-foreground" title={e.message}>
+                {e.message}
+              </div>
+            )}
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
+}
+
 function DeploymentsTable({
   search,
   deploymentsTable,
+  lifecycleTable,
+  expandedIds,
+  onToggleExpand,
   onRows,
   onDeployVersion,
 }: {
   search: string;
   deploymentsTable: string;
+  lifecycleTable: string;
+  expandedIds: Set<string>;
+  onToggleExpand: (id: string) => void;
   onRows: (rows: DeploymentRow[]) => void;
   onDeployVersion: (row: DeploymentRow) => void;
 }) {
@@ -136,17 +247,35 @@ function DeploymentsTable({
         <tbody>
           {filtered.map((r) => {
             const ui = endpointUiUrl(r);
+            const inProgress = IN_PROGRESS.has(r.status ?? '');
+            const open = inProgress || expandedIds.has(r.deployment_id);
             return (
-              <tr key={r.deployment_id} className="border-b last:border-0 hover:bg-muted/40">
+              <Fragment key={r.deployment_id}>
+              <tr className="border-b last:border-0 hover:bg-muted/40">
                 <td className="px-4 py-3">
-                  <button
-                    type="button"
-                    onClick={() => onDeployVersion(r)}
-                    title="Deploy a new version of this model"
-                    className="font-medium text-primary hover:underline"
-                  >
-                    {r.model_name ?? '—'}
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => onToggleExpand(r.deployment_id)}
+                      title={open ? 'Hide lifecycle' : 'Show lifecycle'}
+                      className="text-muted-foreground hover:text-foreground"
+                      aria-label="Toggle lifecycle"
+                    >
+                      {open ? (
+                        <ChevronDown className="h-4 w-4" />
+                      ) : (
+                        <ChevronRight className="h-4 w-4" />
+                      )}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onDeployVersion(r)}
+                      title="Deploy a new version of this model"
+                      className="font-medium text-primary hover:underline"
+                    >
+                      {r.model_name ?? '—'}
+                    </button>
+                  </div>
                 </td>
                 <td className="px-4 py-3 font-mono text-xs text-muted-foreground">
                   {r.uc_full_name ?? '—'}
@@ -181,6 +310,18 @@ function DeploymentsTable({
                   )}
                 </td>
               </tr>
+              {open && (
+                <tr className="border-b last:border-0 bg-muted/20">
+                  <td colSpan={6} className="p-0">
+                    <LifecycleTimeline
+                      lifecycleTable={lifecycleTable}
+                      deploymentId={r.deployment_id}
+                      live={inProgress}
+                    />
+                  </td>
+                </tr>
+              )}
+              </Fragment>
             );
           })}
         </tbody>
@@ -200,14 +341,30 @@ export function DeployedModels({
   const [refreshTick, setRefreshTick] = useState(0);
   const [anyInProgress, setAnyInProgress] = useState(false);
   const [deploymentsTable, setDeploymentsTable] = useState<string | null>(null);
+  const [lifecycleTable, setLifecycleTable] = useState<string | null>(null);
+  const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
 
-  // Resolve which catalog.schema.model_deployments table to read (from the server,
-  // which derives it from the bound deploy job — nothing hardcoded in the client).
+  const toggleExpand = (id: string) =>
+    setExpandedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
+  // Resolve which catalog.schema tables to read (from the server, which derives them
+  // from the bound deploy job — nothing hardcoded in the client).
   useEffect(() => {
     fetch('/api/config')
       .then((r) => r.json())
-      .then((d) => setDeploymentsTable(d.deploymentsTable))
-      .catch(() => setDeploymentsTable('main.default.model_deployments'));
+      .then((d) => {
+        setDeploymentsTable(d.deploymentsTable);
+        setLifecycleTable(d.lifecycleTable);
+      })
+      .catch(() => {
+        setDeploymentsTable('main.default.model_deployments');
+        setLifecycleTable('main.default.model_lifecycle_events');
+      });
   }, []);
 
   // Poll for status changes while any deployment is still running.
@@ -236,7 +393,7 @@ export function DeployedModels({
         </Button>
       </div>
 
-      {deploymentsTable === null ? (
+      {deploymentsTable === null || lifecycleTable === null ? (
         <div className="space-y-3 p-4">
           {[0, 1, 2, 3].map((i) => (
             <Skeleton key={i} className="h-10 w-full" />
@@ -247,6 +404,9 @@ export function DeployedModels({
           key={`${deploymentsTable}:${refreshTick}`}
           search={search}
           deploymentsTable={deploymentsTable}
+          lifecycleTable={lifecycleTable}
+          expandedIds={expandedIds}
+          onToggleExpand={toggleExpand}
           onDeployVersion={onDeployVersion}
           onRows={(rows) =>
             setAnyInProgress(rows.some((r) => IN_PROGRESS.has(r.status ?? '')))

@@ -90,6 +90,7 @@ createApp({
           catalog,
           schema,
           deploymentsTable: `${catalog}.${schema}.model_deployments`,
+          lifecycleTable: `${catalog}.${schema}.model_lifecycle_events`,
         });
       });
 
