@@ -30,6 +30,6 @@ resources:
       environments:
         - environment_key: locked
           spec:
-            environment_version: "2"
+            environment_version: "5"
             dependencies:
               - -r ${workspace.file_path}/requirements.txt
