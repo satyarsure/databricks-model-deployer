@@ -29,3 +29,11 @@ export interface DeploymentRow {
   deployed_date: string | null;
   updated_at: string | null;
 }
+
+// A deployment the user just submitted, shown optimistically on the Deployed Models
+// tab until the (serverless, cold-starting) deploy job writes its first real row.
+export interface PendingDeployment {
+  deployment_id: string;
+  model_name: string;
+  uc_full_name: string;
+}

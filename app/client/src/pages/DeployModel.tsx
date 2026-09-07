@@ -1,7 +1,7 @@
 import { useMemo, useState, type ReactNode } from 'react';
 import { Button, Label } from '@databricks/appkit-ui/react';
 import { Plus, Trash2, Save, Info } from 'lucide-react';
-import type { DeploymentRow } from '../types';
+import type { DeploymentRow, PendingDeployment } from '../types';
 
 // ---- shared types -----------------------------------------------------------
 type ArtifactType = 's3' | 'uc_volume';
@@ -200,7 +200,7 @@ export function DeployModel({
   onCancel,
 }: {
   prefill?: DeploymentRow | null;
-  onDeployed: () => void;
+  onDeployed: (pending?: PendingDeployment) => void;
   onCancel: () => void;
 }) {
   const pf = parsePrefill(prefill ?? null);
@@ -328,12 +328,21 @@ export function DeployModel({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(spec),
       });
+      const body = await res.json().catch(() => ({}));
       if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
         throw new Error(body.error || `Deploy failed (${res.status})`);
       }
       setOk('Deployment started. Track progress on the Deployed Models tab.');
-      setTimeout(onDeployed, 900);
+      // Hand the just-created deployment id back so the Deployed Models tab can show
+      // it optimistically before the (cold-starting) job writes its first row.
+      const pending: PendingDeployment | undefined = body.deployment_id
+        ? {
+            deployment_id: String(body.deployment_id),
+            model_name: name.trim(),
+            uc_full_name: `${ucCatalog.trim()}.${ucSchema.trim()}.${ucModel.trim()}`,
+          }
+        : undefined;
+      setTimeout(() => onDeployed(pending), 900);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {

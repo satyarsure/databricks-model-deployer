@@ -12,9 +12,43 @@ import {
   ChevronRight,
   ChevronDown,
 } from 'lucide-react';
-import type { DeploymentRow } from '../types';
+import type { DeploymentRow, PendingDeployment } from '../types';
 
 const IN_PROGRESS = new Set(['IN_PROGRESS', 'VALIDATING', 'DEPLOYING']);
+
+// A placeholder row for a just-submitted deployment, shown immediately (auto-expanded,
+// "Deploy in progress") until the cold-starting deploy job writes its first real row.
+function makeOptimisticRow(p: PendingDeployment): DeploymentRow {
+  return {
+    deployment_id: p.deployment_id,
+    model_name: p.model_name,
+    description: null,
+    uc_full_name: p.uc_full_name,
+    uc_catalog: null,
+    uc_schema: null,
+    uc_model: null,
+    model_version: null,
+    status: 'IN_PROGRESS',
+    stage: 'wrapper',
+    error_message: null,
+    endpoint_name: null,
+    invoke_url: null,
+    experiment_name: null,
+    eval_dataset: null,
+    serverless_usage_policy: null,
+    tags: null,
+    artifacts_json: null,
+    input_schema_json: null,
+    output_schema_json: null,
+    compute_type: null,
+    gpu_type: null,
+    compute_size: null,
+    scale_to_zero: null,
+    deployed_by: null,
+    deployed_date: new Date().toISOString(),
+    updated_at: null,
+  };
+}
 
 interface LifecycleEvent {
   stage: string | null;
@@ -168,6 +202,8 @@ function DeploymentsTable({
   onToggleExpand,
   onRows,
   onDeployVersion,
+  pending,
+  onResolvePending,
 }: {
   search: string;
   deploymentsTable: string;
@@ -176,28 +212,42 @@ function DeploymentsTable({
   onToggleExpand: (id: string) => void;
   onRows: (rows: DeploymentRow[]) => void;
   onDeployVersion: (row: DeploymentRow) => void;
+  pending: PendingDeployment | null;
+  onResolvePending: () => void;
 }) {
   const { data, loading, error } = useAnalyticsQuery('deployments', {
     deployments_table: sql.string(deploymentsTable),
   });
   const rows = (data ?? []) as DeploymentRow[];
 
+  // The real row exists once the deploy job has written it; drop the optimistic one then.
+  const pendingResolved =
+    pending != null && rows.some((r) => r.deployment_id === pending.deployment_id);
+
   useEffect(() => {
     if (data) onRows(rows);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data]);
 
+  useEffect(() => {
+    if (pendingResolved) onResolvePending();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingResolved]);
+
+  const allRows =
+    pending && !pendingResolved ? [makeOptimisticRow(pending), ...rows] : rows;
+
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
-    if (!q) return rows;
-    return rows.filter(
+    if (!q) return allRows;
+    return allRows.filter(
       (r) =>
         (r.model_name ?? '').toLowerCase().includes(q) ||
         (r.uc_full_name ?? '').toLowerCase().includes(q),
     );
-  }, [rows, search]);
+  }, [allRows, search]);
 
-  if (loading && rows.length === 0) {
+  if (loading && allRows.length === 0) {
     return (
       <div className="space-y-3 p-4">
         {[0, 1, 2, 3].map((i) => (
@@ -333,9 +383,13 @@ function DeploymentsTable({
 export function DeployedModels({
   onDeployNew,
   onDeployVersion,
+  pending,
+  onResolvePending,
 }: {
   onDeployNew: () => void;
   onDeployVersion: (row: DeploymentRow) => void;
+  pending: PendingDeployment | null;
+  onResolvePending: () => void;
 }) {
   const [search, setSearch] = useState('');
   const [refreshTick, setRefreshTick] = useState(0);
@@ -367,12 +421,13 @@ export function DeployedModels({
       });
   }, []);
 
-  // Poll for status changes while any deployment is still running.
+  // Poll for status changes while any deployment is still running — or while a
+  // just-submitted deployment is still waiting for the job to write its first row.
   useEffect(() => {
-    if (!anyInProgress) return;
+    if (!anyInProgress && !pending) return;
     const id = setInterval(() => setRefreshTick((t) => t + 1), 5000);
     return () => clearInterval(id);
-  }, [anyInProgress]);
+  }, [anyInProgress, pending]);
 
   return (
     <div className="rounded-lg border bg-card shadow-sm">
@@ -408,6 +463,8 @@ export function DeployedModels({
           expandedIds={expandedIds}
           onToggleExpand={toggleExpand}
           onDeployVersion={onDeployVersion}
+          pending={pending}
+          onResolvePending={onResolvePending}
           onRows={(rows) =>
             setAnyInProgress(rows.some((r) => IN_PROGRESS.has(r.status ?? '')))
           }

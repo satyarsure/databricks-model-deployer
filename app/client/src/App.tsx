@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Rocket } from 'lucide-react';
 import { DeployedModels } from './pages/DeployedModels';
 import { DeployModel } from './pages/DeployModel';
-import type { DeploymentRow } from './types';
+import type { DeploymentRow, PendingDeployment } from './types';
 
 type Tab = 'deployed' | 'deploy';
 
@@ -17,6 +17,7 @@ function tabClass(active: boolean) {
 export default function App() {
   const [tab, setTab] = useState<Tab>('deployed');
   const [prefill, setPrefill] = useState<DeploymentRow | null>(null);
+  const [pending, setPending] = useState<PendingDeployment | null>(null);
   const [email, setEmail] = useState('');
 
   useEffect(() => {
@@ -72,6 +73,8 @@ export default function App() {
         <div className="max-w-6xl mx-auto">
           {tab === 'deployed' ? (
             <DeployedModels
+              pending={pending}
+              onResolvePending={() => setPending(null)}
               onDeployNew={() => {
                 setPrefill(null);
                 setTab('deploy');
@@ -85,8 +88,9 @@ export default function App() {
             <DeployModel
               key={prefill?.deployment_id ?? 'new'}
               prefill={prefill}
-              onDeployed={() => {
+              onDeployed={(p) => {
                 setPrefill(null);
+                setPending(p ?? null);
                 setTab('deployed');
               }}
               onCancel={() => {
