@@ -10,6 +10,7 @@ import {
   Search,
   ExternalLink,
   ChevronRight,
+  ChevronLeft,
   ChevronDown,
   GitCompare,
 } from 'lucide-react';
@@ -209,6 +210,99 @@ function LifecycleTimeline({
   );
 }
 
+// Page-number items with ellipsis for long ranges (1 … 4 5 6 … 20).
+function pageItems(current: number, total: number): Array<number | 'gap'> {
+  if (total <= 7) return Array.from({ length: total }, (_, i) => i + 1);
+  const items: Array<number | 'gap'> = [1];
+  const start = Math.max(2, current - 1);
+  const end = Math.min(total - 1, current + 1);
+  if (start > 2) items.push('gap');
+  for (let p = start; p <= end; p++) items.push(p);
+  if (end < total - 1) items.push('gap');
+  items.push(total);
+  return items;
+}
+
+// Table footer: page navigation on the left, page-size selector on the right.
+function Pagination({
+  page,
+  totalPages,
+  pageSize,
+  total,
+  onPage,
+  onPageSize,
+}: {
+  page: number;
+  totalPages: number;
+  pageSize: number;
+  total: number;
+  onPage: (p: number) => void;
+  onPageSize: (n: number) => void;
+}) {
+  const cell =
+    'inline-flex h-8 min-w-[2rem] items-center justify-center rounded-md px-2 text-sm transition-colors';
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-3 border-t px-4 py-3">
+      <div className="flex items-center gap-1">
+        <button
+          type="button"
+          disabled={page <= 1}
+          onClick={() => onPage(page - 1)}
+          aria-label="Previous page"
+          className={`${cell} text-muted-foreground hover:bg-muted disabled:pointer-events-none disabled:opacity-40`}
+        >
+          <ChevronLeft className="h-4 w-4" />
+        </button>
+        {pageItems(page, totalPages).map((it, i) =>
+          it === 'gap' ? (
+            <span key={`gap-${i}`} className="px-1 text-muted-foreground">
+              …
+            </span>
+          ) : (
+            <button
+              key={it}
+              type="button"
+              onClick={() => onPage(it)}
+              aria-current={it === page ? 'page' : undefined}
+              className={`${cell} ${
+                it === page
+                  ? 'bg-primary text-primary-foreground'
+                  : 'text-foreground hover:bg-muted'
+              }`}
+            >
+              {it}
+            </button>
+          ),
+        )}
+        <button
+          type="button"
+          disabled={page >= totalPages}
+          onClick={() => onPage(page + 1)}
+          aria-label="Next page"
+          className={`${cell} text-muted-foreground hover:bg-muted disabled:pointer-events-none disabled:opacity-40`}
+        >
+          <ChevronRight className="h-4 w-4" />
+        </button>
+      </div>
+      <div className="flex items-center gap-3">
+        <span className="text-xs text-muted-foreground">{total} total</span>
+        <select
+          value={pageSize}
+          onChange={(e) => onPageSize(Number(e.target.value))}
+          aria-label="Rows per page"
+          className="rounded-md border border-input bg-background px-2 py-1.5 text-sm outline-none focus:ring-2 focus:ring-ring"
+        >
+          {[10, 25, 50, 100].map((n) => (
+            <option key={n} value={n}>
+              {n} / page
+            </option>
+          ))}
+        </select>
+      </div>
+    </div>
+  );
+}
+
 function DeploymentsTable({
   search,
   deploymentsTable,
@@ -278,6 +372,16 @@ function DeploymentsTable({
     );
   }, [allRows, search]);
 
+  // Client-side pagination (the query caps at 200 rows, so this is cheap).
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(25);
+  useEffect(() => {
+    setPage(1);
+  }, [search, pageSize]);
+  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
+  const safePage = Math.min(page, totalPages);
+  const pageRows = filtered.slice((safePage - 1) * pageSize, safePage * pageSize);
+
   if (loading && allRows.length === 0) {
     return (
       <div className="space-y-3 p-4">
@@ -313,6 +417,7 @@ function DeploymentsTable({
   }
 
   return (
+    <>
     <div className="overflow-x-auto">
       <table className="w-full min-w-[860px] table-fixed text-sm">
         <colgroup>
@@ -334,7 +439,7 @@ function DeploymentsTable({
           </tr>
         </thead>
         <tbody>
-          {filtered.map((r) => {
+          {pageRows.map((r) => {
             const ui = endpointUiUrl(r);
             const inProgress = IN_PROGRESS.has(r.status ?? '');
             const open = inProgress || expandedIds.has(r.deployment_id);
@@ -436,6 +541,15 @@ function DeploymentsTable({
         </tbody>
       </table>
     </div>
+    <Pagination
+      page={safePage}
+      totalPages={totalPages}
+      pageSize={pageSize}
+      total={filtered.length}
+      onPage={setPage}
+      onPageSize={setPageSize}
+    />
+    </>
   );
 }
 
