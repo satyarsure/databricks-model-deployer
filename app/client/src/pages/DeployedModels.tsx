@@ -125,15 +125,24 @@ function LifecycleTimeline({
   lifecycleTable,
   deploymentId,
   live,
+  nonce,
 }: {
   lifecycleTable: string;
   deploymentId: string;
   live: boolean;
+  nonce: number;
 }) {
-  const { data, loading, error } = useAnalyticsQuery('lifecycle', {
-    lifecycle_table: sql.string(lifecycleTable),
-    deployment_id: sql.string(deploymentId),
-  });
+  // Changing nonce (per poll / page load) re-executes the query and busts the cache,
+  // so an in-progress deployment's timeline streams new events instead of showing stale data.
+  const params = useMemo(
+    () => ({
+      lifecycle_table: sql.string(lifecycleTable),
+      deployment_id: sql.string(deploymentId),
+      refresh_nonce: sql.string(String(nonce)),
+    }),
+    [lifecycleTable, deploymentId, nonce],
+  );
+  const { data, loading, error } = useAnalyticsQuery('lifecycle', params);
   const events = (data ?? []) as LifecycleEvent[];
 
   if (loading && events.length === 0) {
@@ -204,6 +213,7 @@ function DeploymentsTable({
   onDeployVersion,
   pending,
   onResolvePending,
+  nonce,
 }: {
   search: string;
   deploymentsTable: string;
@@ -214,10 +224,18 @@ function DeploymentsTable({
   onDeployVersion: (row: DeploymentRow) => void;
   pending: PendingDeployment | null;
   onResolvePending: () => void;
+  nonce: number;
 }) {
-  const { data, loading, error } = useAnalyticsQuery('deployments', {
-    deployments_table: sql.string(deploymentsTable),
-  });
+  // Changing nonce (per poll / page load) re-executes the query and busts the cache,
+  // so a just-submitted or in-progress deployment shows up instead of a stale list.
+  const params = useMemo(
+    () => ({
+      deployments_table: sql.string(deploymentsTable),
+      refresh_nonce: sql.string(String(nonce)),
+    }),
+    [deploymentsTable, nonce],
+  );
+  const { data, loading, error } = useAnalyticsQuery('deployments', params);
   const rows = (data ?? []) as DeploymentRow[];
 
   // The real row exists once the deploy job has written it; drop the optimistic one then.
@@ -367,6 +385,7 @@ function DeploymentsTable({
                       lifecycleTable={lifecycleTable}
                       deploymentId={r.deployment_id}
                       live={inProgress}
+                      nonce={nonce}
                     />
                   </td>
                 </tr>
@@ -392,7 +411,10 @@ export function DeployedModels({
   onResolvePending: () => void;
 }) {
   const [search, setSearch] = useState('');
-  const [refreshTick, setRefreshTick] = useState(0);
+  // A cache-busting nonce for the analytics queries: unique per page load (so a manual
+  // refresh always fetches fresh rows, not a cached list that predates an in-progress
+  // deployment) and bumped on each poll tick while something is deploying.
+  const [nonce, setNonce] = useState(() => Date.now());
   const [anyInProgress, setAnyInProgress] = useState(false);
   const [deploymentsTable, setDeploymentsTable] = useState<string | null>(null);
   const [lifecycleTable, setLifecycleTable] = useState<string | null>(null);
@@ -425,7 +447,7 @@ export function DeployedModels({
   // just-submitted deployment is still waiting for the job to write its first row.
   useEffect(() => {
     if (!anyInProgress && !pending) return;
-    const id = setInterval(() => setRefreshTick((t) => t + 1), 5000);
+    const id = setInterval(() => setNonce(Date.now()), 5000);
     return () => clearInterval(id);
   }, [anyInProgress, pending]);
 
@@ -456,10 +478,11 @@ export function DeployedModels({
         </div>
       ) : (
         <DeploymentsTable
-          key={`${deploymentsTable}:${refreshTick}`}
+          key={deploymentsTable}
           search={search}
           deploymentsTable={deploymentsTable}
           lifecycleTable={lifecycleTable}
+          nonce={nonce}
           expandedIds={expandedIds}
           onToggleExpand={toggleExpand}
           onDeployVersion={onDeployVersion}
