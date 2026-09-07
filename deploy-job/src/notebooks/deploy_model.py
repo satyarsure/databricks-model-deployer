@@ -148,6 +148,14 @@ merge_status(
     deployed_by=spec.get("deployed_by"), run_id=run_id,
 )
 spark.sql(f"UPDATE {TABLE} SET deployed_date = CURRENT_TIMESTAMP() WHERE deployment_id = {deployment_id} AND deployed_date IS NULL")
+# A serverless task can auto-retry on failure; each attempt re-runs this notebook from the
+# top. Clear any lifecycle events from a prior attempt of THIS deployment so the timeline
+# shows a single clean run (wrapper -> validator -> deployer) instead of duplicated events.
+# (model_deployments is a MERGE/upsert keyed by deployment_id, so it needs no such reset.)
+try:
+    spark.sql(f"DELETE FROM {LIFECYCLE_TABLE} WHERE deployment_id = {deployment_id}")
+except Exception as de:
+    print(f"[lifecycle] could not reset prior events: {de}")
 log_event("wrapper", "IN_PROGRESS", "deployment submitted")
 
 # COMMAND ----------
