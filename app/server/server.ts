@@ -7,12 +7,42 @@ const fieldSchema = z.object({
   type: z.string().min(1),
 });
 
-const artifactSchema = z.object({
-  label: z.string().optional(),
-  type: z.enum(['s3', 'uc_volume']),
-  path: z.string().min(1),
-  traffic_percent: z.number().min(0).max(100).optional(),
-});
+// A variant is either a NEW artifact (S3/UC Volume path, wrapped+registered as a new
+// version) or an EXISTING already-registered version of the same UC model (referenced
+// as-is for a champion-vs-challenger A/B test — no re-wrap).
+const artifactSchema = z
+  .object({
+    label: z.string().optional(),
+    source: z.enum(['artifact', 'existing']).default('artifact'),
+    type: z.enum(['s3', 'uc_volume']).optional(),
+    path: z.string().optional(),
+    version: z.union([z.number(), z.string()]).optional(),
+    traffic_percent: z.number().min(0).max(100).optional(),
+  })
+  .superRefine((a, ctx) => {
+    if (a.source === 'existing') {
+      const v = a.version == null ? '' : String(a.version).trim();
+      if (!v || !/^\d+$/.test(v))
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'existing variant needs a numeric version',
+          path: ['version'],
+        });
+    } else {
+      if (!a.type)
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'artifact variant needs a type',
+          path: ['type'],
+        });
+      if (!a.path || !a.path.trim())
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'artifact variant needs a path',
+          path: ['path'],
+        });
+    }
+  });
 
 const deploySpecSchema = z.object({
   name: z.string().min(1),

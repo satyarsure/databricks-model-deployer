@@ -240,6 +240,15 @@ variant_versions = []
 try:
     for i, art in enumerate(artifacts):
         label = art.get("label") or chr(ord("A") + i)
+        traffic = art.get("traffic_percent", 100 // max(len(artifacts), 1))
+        # A/B "champion vs challenger": a variant may reference an already-registered
+        # version of this same UC model (the currently-deployed champion) instead of a
+        # new artifact. Serve it as-is — no re-wrap, no new version.
+        if art.get("source") == "existing":
+            version = int(art.get("version"))
+            variant_versions.append({"label": label, "version": version, "traffic_percent": traffic})
+            print(f"[wrapper] variant {label} <- existing {uc_full} v{version}")
+            continue
         print(f"[wrapper] variant {label} <- {art.get('path')}")
         raw_model = load_model_object(localize_artifact(art))
         wrapped = WrappedModel(raw_model)
@@ -256,8 +265,7 @@ try:
                 pip_requirements=SERVED_PIP_REQUIREMENTS,
             )
         version = latest_version(uc_full)
-        variant_versions.append({"label": label, "version": version,
-                                 "traffic_percent": art.get("traffic_percent", 100 // max(len(artifacts), 1))})
+        variant_versions.append({"label": label, "version": version, "traffic_percent": traffic})
         print(f"[wrapper] registered {uc_full} v{version} (variant {label})")
     model_version_str = ",".join(f'{v["label"]}:{v["version"]}' for v in variant_versions)
     merge_status(model_version=model_version_str, stage="wrapped")

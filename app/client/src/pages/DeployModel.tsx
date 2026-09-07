@@ -1,15 +1,22 @@
-import { useMemo, useState, type ReactNode } from 'react';
-import { Button, Label } from '@databricks/appkit-ui/react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { Button, Label, useAnalyticsQuery } from '@databricks/appkit-ui/react';
+import { sql } from '@databricks/appkit-ui/js';
 import { Plus, Trash2, Save, Info } from 'lucide-react';
 import type { DeploymentRow, PendingDeployment } from '../types';
 
 // ---- shared types -----------------------------------------------------------
 type ArtifactType = 's3' | 'uc_volume';
+type VariantSource = 'artifact' | 'existing';
 type Size = 'SMALL' | 'MEDIUM' | 'LARGE';
 interface Artifact {
   label: string;
+  // 'artifact' = a new S3/UC-Volume artifact (wrapped + registered as a new version);
+  // 'existing' = an already-registered version of the same UC model (referenced as-is,
+  // for a champion-vs-challenger A/B test).
+  source: VariantSource;
   type: ArtifactType;
   path: string;
+  version: string; // used when source === 'existing'
   traffic_percent: number;
 }
 
@@ -73,17 +80,26 @@ function parseSchema(text: string, requireNonEmpty: boolean): SchemaParse {
 function parsePrefill(row: DeploymentRow | null): Prefill | null {
   if (!row) return null;
   const rawArts = safeParse<
-    Array<{ label?: string; type?: string; path?: string; traffic_percent?: number }>
+    Array<{
+      label?: string;
+      source?: string;
+      type?: string;
+      path?: string;
+      version?: number | string;
+      traffic_percent?: number;
+    }>
   >(row.artifacts_json, []);
   const artifacts: Artifact[] =
     Array.isArray(rawArts) && rawArts.length > 0
       ? rawArts.map((a, i) => ({
           label: a.label ?? String.fromCharCode(65 + i),
+          source: a.source === 'existing' ? 'existing' : 'artifact',
           type: a.type === 's3' ? 's3' : 'uc_volume',
           path: a.path ?? '',
+          version: a.version != null ? String(a.version) : '',
           traffic_percent: Number(a.traffic_percent ?? 0),
         }))
-      : [{ label: 'A', type: 'uc_volume', path: '', traffic_percent: 100 }];
+      : [{ label: 'A', source: 'artifact', type: 'uc_volume', path: '', version: '', traffic_percent: 100 }];
   const sizeUpper = (row.compute_size ?? '').toUpperCase();
   const size: Size =
     sizeUpper === 'MEDIUM' || sizeUpper === 'LARGE' ? sizeUpper : 'SMALL';
@@ -105,6 +121,22 @@ function parsePrefill(row: DeploymentRow | null): Prefill | null {
     gpuType: row.gpu_type || 'A10',
     size,
     scaleToZero: row.scale_to_zero == null ? true : row.scale_to_zero === 'true',
+  };
+}
+
+// Initial form values for an A/B test against an already-deployed model: variant A is
+// the existing model's current version (referenced, not re-uploaded), variant B is a new
+// artifact. Reuses parsePrefill so name/experiment/UC are pre-filled and locked.
+function parseAbBaseline(row: DeploymentRow): Prefill | null {
+  const pf = parsePrefill(row);
+  if (!pf) return null;
+  const currentVersion = (row.model_version ?? '').match(/(\d+)\s*$/)?.[1] ?? '';
+  return {
+    ...pf,
+    artifacts: [
+      { label: 'A', source: 'existing', type: 'uc_volume', path: '', version: currentVersion, traffic_percent: 70 },
+      { label: 'B', source: 'artifact', type: 'uc_volume', path: '', version: '', traffic_percent: 30 },
+    ],
   };
 }
 
@@ -193,24 +225,88 @@ function Toggle({
   );
 }
 
+// Dropdown of registered versions for a UC model (variant A of an A/B test). Sourced from
+// the model_versions analytics query (versions this app has deployed for that model).
+function VersionPicker({
+  deploymentsTable,
+  ucFull,
+  value,
+  onChange,
+}: {
+  deploymentsTable: string | null;
+  ucFull: string;
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  const params = useMemo(
+    () => ({
+      deployments_table: sql.string(deploymentsTable ?? 'main.default.model_deployments'),
+      uc_full: sql.string(ucFull),
+      refresh_nonce: sql.string('0'),
+    }),
+    [deploymentsTable, ucFull],
+  );
+  const { data, loading } = useAnalyticsQuery('model_versions', params);
+  const versions = ((data ?? []) as Array<{ version: number | string }>)
+    .map((r) => String(r.version))
+    .filter(Boolean);
+  // Keep the pre-filled current version selectable even if the query hasn't loaded it.
+  const options = value && !versions.includes(value) ? [value, ...versions] : versions;
+  return (
+    <select
+      className={inputCls}
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      disabled={deploymentsTable === null}
+    >
+      {options.length === 0 && (
+        <option value="">{loading ? 'Loading versions…' : 'No versions found'}</option>
+      )}
+      {options.map((v) => (
+        <option key={v} value={v}>
+          v{v}
+        </option>
+      ))}
+    </select>
+  );
+}
+
 // ---- main form --------------------------------------------------------------
 export function DeployModel({
   prefill,
+  abBaseline,
   onDeployed,
   onCancel,
 }: {
   prefill?: DeploymentRow | null;
+  abBaseline?: DeploymentRow | null;
   onDeployed: (pending?: PendingDeployment) => void;
   onCancel: () => void;
 }) {
-  const pf = parsePrefill(prefill ?? null);
+  const isAb = !!abBaseline;
+  const pf = isAb ? parseAbBaseline(abBaseline!) : parsePrefill(prefill ?? null);
+  // Both "new version" and "A/B test" lock the model identity (name/experiment/UC).
   const isNewVersion = pf !== null;
   const lockedCls = isNewVersion ? ' opacity-60 cursor-not-allowed' : '';
+
+  // The A/B version picker needs the real deployments table (resolved server-side).
+  const [deploymentsTable, setDeploymentsTable] = useState<string | null>(null);
+  useEffect(() => {
+    if (!isAb) return;
+    fetch('/api/config')
+      .then((r) => r.json())
+      .then((d) => setDeploymentsTable(d.deploymentsTable ?? null))
+      .catch(() => setDeploymentsTable(null));
+  }, [isAb]);
+
+  const ucFull = abBaseline?.uc_full_name ?? '';
 
   const [name, setName] = useState(pf?.name ?? '');
   const [description, setDescription] = useState(pf?.description ?? '');
   const [artifacts, setArtifacts] = useState<Artifact[]>(
-    pf?.artifacts ?? [{ label: 'A', type: 'uc_volume', path: '', traffic_percent: 100 }],
+    pf?.artifacts ?? [
+      { label: 'A', source: 'artifact', type: 'uc_volume', path: '', version: '', traffic_percent: 100 },
+    ],
   );
   const [inputSchemaText, setInputSchemaText] = useState(pf?.inputSchemaText ?? '[]');
   const [outputSchemaText, setOutputSchemaText] = useState(
@@ -244,8 +340,10 @@ export function DeployModel({
       ...prev,
       {
         label: String.fromCharCode(65 + prev.length),
+        source: 'artifact',
         type: 'uc_volume',
         path: '',
+        version: '',
         traffic_percent: 0,
       },
     ]);
@@ -258,7 +356,10 @@ export function DeployModel({
 
   function validate(): string | null {
     if (!name.trim()) return 'Model name is required.';
-    if (artifacts.some((a) => !a.path.trim())) return 'Every artifact needs a path.';
+    if (artifacts.some((a) => a.source === 'artifact' && !a.path.trim()))
+      return 'Every new-artifact variant needs a path.';
+    if (artifacts.some((a) => a.source === 'existing' && !/^\d+$/.test(a.version.trim())))
+      return 'Every existing-model variant needs a version.';
     if (artifacts.length > 1 && trafficTotal !== 100)
       return `A/B traffic must total 100% (currently ${trafficTotal}%).`;
     const inCheck = parseSchema(inputSchemaText, false);
@@ -299,12 +400,22 @@ export function DeployModel({
       const spec = {
         name: name.trim(),
         description,
-        artifacts: artifacts.map((a) => ({
-          label: a.label,
-          type: a.type,
-          path: a.path.trim(),
-          traffic_percent: Number(a.traffic_percent) || 0,
-        })),
+        artifacts: artifacts.map((a) =>
+          a.source === 'existing'
+            ? {
+                label: a.label,
+                source: 'existing' as const,
+                version: a.version.trim(),
+                traffic_percent: Number(a.traffic_percent) || 0,
+              }
+            : {
+                label: a.label,
+                source: 'artifact' as const,
+                type: a.type,
+                path: a.path.trim(),
+                traffic_percent: Number(a.traffic_percent) || 0,
+              },
+        ),
         input_schema: inParsed.fields,
         output_schema: outParsed.fields,
         experiment_name: experimentName.trim(),
@@ -360,12 +471,14 @@ export function DeployModel({
             <Info className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
             <div>
               <p className="font-medium text-foreground">
-                Deploying a new version of “{pf?.name}”
+                {isAb
+                  ? `A/B test of “${pf?.name}”`
+                  : `Deploying a new version of “${pf?.name}”`}
               </p>
               <p className="text-muted-foreground">
-                Fields are pre-filled from the last deployment. Model name, experiment,
-                and UC model are locked; update the artifact and any other settings, then
-                Save &amp; Deploy.
+                {isAb
+                  ? 'Variant A keeps serving an existing version of this model; variant B is a new artifact you provide. Set the traffic split (totals 100%), then Save & Deploy — both are served on the same endpoint and @champion goes to the higher-traffic variant.'
+                  : 'Fields are pre-filled from the last deployment. Model name, experiment, and UC model are locked; update the artifact and any other settings, then Save & Deploy.'}
               </p>
             </div>
           </div>
@@ -400,6 +513,7 @@ export function DeployModel({
                 <div className="mb-2 flex items-center justify-between">
                   <span className="rounded bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">
                     Variant {a.label}
+                    {a.source === 'existing' ? ' · existing' : ''}
                   </span>
                   {artifacts.length > 1 && (
                     <button
@@ -412,26 +526,47 @@ export function DeployModel({
                     </button>
                   )}
                 </div>
-                <div className="mb-2">
-                  <Segmented<ArtifactType>
-                    value={a.type}
-                    onChange={(v) => setArtifact(i, { type: v })}
-                    options={[
-                      { value: 's3', label: 'S3 Bucket' },
-                      { value: 'uc_volume', label: 'UC Volume' },
-                    ]}
-                  />
-                </div>
-                <input
-                  className={inputCls}
-                  placeholder={
-                    a.type === 's3'
-                      ? 's3://bucket/path/model.pkl'
-                      : '/Volumes/catalog/schema/volume/model.pkl'
-                  }
-                  value={a.path}
-                  onChange={(e) => setArtifact(i, { path: e.target.value })}
-                />
+                {a.source === 'existing' ? (
+                  <div className="space-y-2">
+                    <div className="rounded bg-muted/50 px-2 py-1 text-xs text-muted-foreground">
+                      Existing deployed model —{' '}
+                      <span className="font-mono">{ucFull || '—'}</span>. Pick which version
+                      to keep serving as this variant.
+                    </div>
+                    <div>
+                      <Label className="mb-1 block text-xs text-muted-foreground">Version</Label>
+                      <VersionPicker
+                        deploymentsTable={deploymentsTable}
+                        ucFull={ucFull}
+                        value={a.version}
+                        onChange={(v) => setArtifact(i, { version: v })}
+                      />
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <div className="mb-2">
+                      <Segmented<ArtifactType>
+                        value={a.type}
+                        onChange={(v) => setArtifact(i, { type: v })}
+                        options={[
+                          { value: 's3', label: 'S3 Bucket' },
+                          { value: 'uc_volume', label: 'UC Volume' },
+                        ]}
+                      />
+                    </div>
+                    <input
+                      className={inputCls}
+                      placeholder={
+                        a.type === 's3'
+                          ? 's3://bucket/path/model.pkl'
+                          : '/Volumes/catalog/schema/volume/model.pkl'
+                      }
+                      value={a.path}
+                      onChange={(e) => setArtifact(i, { path: e.target.value })}
+                    />
+                  </>
+                )}
                 {multi && (
                   <div className="mt-2 flex items-center gap-2">
                     <Label className="text-xs text-muted-foreground">Traffic %</Label>

@@ -51,6 +51,7 @@ function tabClass(active: boolean) {
 export default function App() {
   const [tab, setTab] = useState<Tab>('deployed');
   const [prefill, setPrefill] = useState<DeploymentRow | null>(null);
+  const [abBaseline, setAbBaseline] = useState<DeploymentRow | null>(null);
   const [pending, setPendingState] = useState<PendingDeployment | null>(() => loadPending());
   const [email, setEmail] = useState('');
 
@@ -104,7 +105,11 @@ export default function App() {
             className={tabClass(tab === 'deploy')}
             onClick={() => setTab('deploy')}
           >
-            {prefill ? `Deploy Model — ${prefill.model_name}` : 'Deploy Model'}
+            {abBaseline
+              ? `A/B Test — ${abBaseline.model_name}`
+              : prefill
+                ? `Deploy Model — ${prefill.model_name}`
+                : 'Deploy Model'}
           </button>
         </div>
       </div>
@@ -117,24 +122,34 @@ export default function App() {
               onResolvePending={() => setPending(null)}
               onDeployNew={() => {
                 setPrefill(null);
+                setAbBaseline(null);
                 setTab('deploy');
               }}
               onDeployVersion={(row) => {
+                setAbBaseline(null);
                 setPrefill(row);
+                setTab('deploy');
+              }}
+              onAbTest={(row) => {
+                setPrefill(null);
+                setAbBaseline(row);
                 setTab('deploy');
               }}
             />
           ) : (
             <DeployModel
-              key={prefill?.deployment_id ?? 'new'}
+              key={abBaseline ? `ab-${abBaseline.deployment_id}` : (prefill?.deployment_id ?? 'new')}
               prefill={prefill}
+              abBaseline={abBaseline}
               onDeployed={(p) => {
                 setPrefill(null);
+                setAbBaseline(null);
                 setPending(p ?? null);
                 setTab('deployed');
               }}
               onCancel={() => {
                 setPrefill(null);
+                setAbBaseline(null);
                 setTab('deployed');
               }}
             />

@@ -11,6 +11,7 @@ import {
   ExternalLink,
   ChevronRight,
   ChevronDown,
+  GitCompare,
 } from 'lucide-react';
 import type { DeploymentRow, PendingDeployment } from '../types';
 
@@ -216,6 +217,7 @@ function DeploymentsTable({
   onToggleExpand,
   onRows,
   onDeployVersion,
+  onAbTest,
   pending,
   onResolvePending,
   nonce,
@@ -227,6 +229,7 @@ function DeploymentsTable({
   onToggleExpand: (id: string) => void;
   onRows: (rows: DeploymentRow[]) => void;
   onDeployVersion: (row: DeploymentRow) => void;
+  onAbTest: (row: DeploymentRow) => void;
   pending: PendingDeployment | null;
   onResolvePending: () => void;
   nonce: number;
@@ -374,18 +377,30 @@ function DeploymentsTable({
                   )}
                 </td>
                 <td className="px-4 py-3">
-                  {r.status === 'COMPLETE' && ui ? (
-                    <a
-                      href={ui}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1 text-primary hover:underline"
-                    >
-                      Open <ExternalLink className="h-3.5 w-3.5" />
-                    </a>
-                  ) : (
-                    <span className="text-muted-foreground">—</span>
-                  )}
+                  <div className="flex items-center gap-3">
+                    {r.status === 'COMPLETE' && ui ? (
+                      <a
+                        href={ui}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1 text-primary hover:underline"
+                      >
+                        Open <ExternalLink className="h-3.5 w-3.5" />
+                      </a>
+                    ) : (
+                      <span className="text-muted-foreground">—</span>
+                    )}
+                    {r.status === 'COMPLETE' && (
+                      <button
+                        type="button"
+                        onClick={() => onAbTest(r)}
+                        title="Start an A/B test with this deployed model as variant A"
+                        className="inline-flex items-center gap-1 rounded-md border border-input px-2 py-0.5 text-xs text-muted-foreground hover:text-foreground"
+                      >
+                        <GitCompare className="h-3.5 w-3.5" /> A/B test
+                      </button>
+                    )}
+                  </div>
                 </td>
               </tr>
               {open && (
@@ -412,11 +427,13 @@ function DeploymentsTable({
 export function DeployedModels({
   onDeployNew,
   onDeployVersion,
+  onAbTest,
   pending,
   onResolvePending,
 }: {
   onDeployNew: () => void;
   onDeployVersion: (row: DeploymentRow) => void;
+  onAbTest: (row: DeploymentRow) => void;
   pending: PendingDeployment | null;
   onResolvePending: () => void;
 }) {
@@ -496,6 +513,7 @@ export function DeployedModels({
           expandedIds={expandedIds}
           onToggleExpand={toggleExpand}
           onDeployVersion={onDeployVersion}
+          onAbTest={onAbTest}
           pending={pending}
           onResolvePending={onResolvePending}
           onRows={(rows) =>
