@@ -143,7 +143,12 @@ function LifecycleTimeline({
     [lifecycleTable, deploymentId, nonce],
   );
   const { data, loading, error } = useAnalyticsQuery('lifecycle', params);
-  const events = (data ?? []) as LifecycleEvent[];
+  // Keep the last successful events so a background refetch (each poll tick) doesn't
+  // blank the timeline to a skeleton — only newly-arrived events re-render.
+  const [events, setEvents] = useState<LifecycleEvent[]>([]);
+  useEffect(() => {
+    if (data) setEvents((data ?? []) as LifecycleEvent[]);
+  }, [data]);
 
   if (loading && events.length === 0) {
     return (
@@ -236,16 +241,21 @@ function DeploymentsTable({
     [deploymentsTable, nonce],
   );
   const { data, loading, error } = useAnalyticsQuery('deployments', params);
-  const rows = (data ?? []) as DeploymentRow[];
+  // Keep the last successful rows so a background refetch (each poll tick) doesn't blank
+  // the table to a skeleton — React then re-renders only the cells whose values changed.
+  const [rows, setRows] = useState<DeploymentRow[]>([]);
+  useEffect(() => {
+    if (data) {
+      const r = (data ?? []) as DeploymentRow[];
+      setRows(r);
+      onRows(r);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data]);
 
   // The real row exists once the deploy job has written it; drop the optimistic one then.
   const pendingResolved =
     pending != null && rows.some((r) => r.deployment_id === pending.deployment_id);
-
-  useEffect(() => {
-    if (data) onRows(rows);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data]);
 
   useEffect(() => {
     if (pendingResolved) onResolvePending();
