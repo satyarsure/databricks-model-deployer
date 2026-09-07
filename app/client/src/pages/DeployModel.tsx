@@ -289,17 +289,20 @@ export function DeployModel({
   const isNewVersion = pf !== null;
   const lockedCls = isNewVersion ? ' opacity-60 cursor-not-allowed' : '';
 
-  // The A/B version picker needs the real deployments table (resolved server-side).
+  // When the UC model is already known (deploying a new version OR an A/B test), a variant
+  // can reference an existing registered version instead of a new artifact.
+  const ucFull = (abBaseline ?? prefill)?.uc_full_name ?? '';
+  const canUseExisting = isNewVersion && !!ucFull;
+
+  // The version picker needs the real deployments table (resolved server-side).
   const [deploymentsTable, setDeploymentsTable] = useState<string | null>(null);
   useEffect(() => {
-    if (!isAb) return;
+    if (!canUseExisting) return;
     fetch('/api/config')
       .then((r) => r.json())
       .then((d) => setDeploymentsTable(d.deploymentsTable ?? null))
       .catch(() => setDeploymentsTable(null));
-  }, [isAb]);
-
-  const ucFull = abBaseline?.uc_full_name ?? '';
+  }, [canUseExisting]);
 
   const [name, setName] = useState(pf?.name ?? '');
   const [description, setDescription] = useState(pf?.description ?? '');
@@ -505,7 +508,11 @@ export function DeployModel({
 
         <Section
           title="Artifacts"
-          hint="One or more model artifacts (S3 or UC Volume). Add multiple variants to A/B test with a traffic split that totals 100%."
+          hint={
+            canUseExisting
+              ? 'One or more variants. Each can be a new artifact (S3 or UC Volume) or an existing registered version of this model — switch with the toggle. Add multiple to A/B test with a traffic split that totals 100%.'
+              : 'One or more model artifacts (S3 or UC Volume). Add multiple variants to A/B test with a traffic split that totals 100%.'
+          }
         >
           <div className="space-y-3">
             {artifacts.map((a, i) => (
@@ -526,6 +533,18 @@ export function DeployModel({
                     </button>
                   )}
                 </div>
+                {canUseExisting && (
+                  <div className="mb-2">
+                    <Segmented<VariantSource>
+                      value={a.source}
+                      onChange={(v) => setArtifact(i, { source: v })}
+                      options={[
+                        { value: 'artifact', label: 'New artifact' },
+                        { value: 'existing', label: 'Existing version' },
+                      ]}
+                    />
+                  </div>
+                )}
                 {a.source === 'existing' ? (
                   <div className="space-y-2">
                     <div className="rounded bg-muted/50 px-2 py-1 text-xs text-muted-foreground">
