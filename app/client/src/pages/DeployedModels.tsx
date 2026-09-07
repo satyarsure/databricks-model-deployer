@@ -352,14 +352,19 @@ function DeploymentsTable({
                       type="button"
                       onClick={() => onDeployVersion(r)}
                       title="Deploy a new version of this model"
-                      className="font-medium text-primary hover:underline"
+                      className="whitespace-nowrap font-medium text-primary hover:underline"
                     >
                       {r.model_name ?? '—'}
                     </button>
                   </div>
                 </td>
                 <td className="px-4 py-3 font-mono text-xs text-muted-foreground">
-                  {r.uc_full_name ?? '—'}
+                  <span
+                    className="block max-w-[240px] truncate"
+                    title={r.uc_full_name ?? ''}
+                  >
+                    {r.uc_full_name ?? '—'}
+                  </span>
                 </td>
                 <td className="px-4 py-3">{r.model_version ?? '—'}</td>
                 <td className="px-4 py-3 text-muted-foreground">
@@ -369,7 +374,7 @@ function DeploymentsTable({
                   <StatusBadge status={r.status} />
                   {r.status === 'FAILED' && r.error_message && (
                     <div
-                      className="mt-1 max-w-xs truncate text-xs text-muted-foreground"
+                      className="mt-1 max-w-[200px] truncate text-xs text-muted-foreground"
                       title={r.error_message}
                     >
                       {r.error_message}
@@ -377,7 +382,7 @@ function DeploymentsTable({
                   )}
                 </td>
                 <td className="px-4 py-3">
-                  <div className="flex items-center gap-3">
+                  <div className="flex items-center gap-3 whitespace-nowrap">
                     {r.status === 'COMPLETE' && ui ? (
                       <a
                         href={ui}
