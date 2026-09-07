@@ -237,6 +237,32 @@ databricks serving-endpoints query churn_predictor_endpoint \
 
 ---
 
+## TC4b — A/B against an existing deployed model (champion vs. challenger) ⭐
+
+Instead of two new artifacts, pit an already-deployed model against a new candidate. Requires a
+completed deployment to test against (e.g. **TC1**'s `house_price_model`, or run TC4 first).
+
+Two entry points open the same form:
+- On **Deployed Models**, click the **A/B test** button (Serving column) on a Complete row, **or**
+- click the model name (opens the new-version form) — either way, each variant has a
+  **New artifact / Existing version** toggle.
+
+Set it up as:
+
+| field | value |
+|---|---|
+| Variant **A** | **Existing version** → pick a version from the dropdown (e.g. the current champion) · Traffic **70** |
+| Variant **B** | **New artifact** · UC Volume · `.../test_models/house_price_linreg_v2.pkl` · Traffic **30** |
+
+(Model name / experiment / UC model are locked to the chosen model.)
+
+**Expected:** variant A is served **as-is** (no re-wrap, no new version); only B is wrapped and
+registered as the next version. `model_version` reads like `A:7,B:8`; the model's existing endpoint
+is **updated in place** with two served entities at 70/30; `@champion` follows the higher-traffic
+variant. Verify with the same `serving-endpoints get … | jq '.config.traffic_config.routes'` check.
+
+---
+
 ## TC5 — Validation FAILURE (schema mismatch) ⭐
 
 Deliberately declare **2** input features for a model trained on **4**. The pipeline fails the

@@ -10,16 +10,22 @@ sizing, scale-to-zero, inference tables, and a serverless **budget policy** for 
 Deployment status and full **model lifecycle history** are tracked in Delta tables, with the active
 version marked by a UC `@champion` alias.
 
+An A/B variant can be a **new artifact** (wrapped and registered as a new version) or an
+**already-registered version** of the same model referenced as-is — a champion-vs-challenger test
+that serves the current model against a new candidate on the same endpoint.
+
 ## Architecture
 
 ```
 React/AppKit app
- ├─ Deployed Models tab  → reads the model_deployments Delta table (search, status, "Open" links,
- │                          click a model name to deploy a new version with fields pre-filled)
+ ├─ Deployed Models tab  → reads the model_deployments Delta table (search + pagination, status,
+ │                          "Open" links, a live lifecycle timeline per row; click a model name to
+ │                          deploy a new version, or "A/B test" to pit it against a new candidate)
  └─ Deploy Model tab     → POST /api/deploy → triggers the deploy job
                                                    │
 Deploy job (DABs, serverless) — one notebook, three stages:
-   Wrapper    → load artifact(s), wrap as MLflow pyfunc, build signature, register each A/B variant to UC
+   Wrapper    → load artifact(s), wrap as MLflow pyfunc, build signature, register each new-artifact
+                variant to UC (a variant may instead reference an existing registered version)
    Validator  → load the registered pyfunc, smoke-test predict, optional mlflow.evaluate vs an eval dataset
    Deployer   → create/update the serving endpoint (traffic split, compute, scale-to-zero, tags,
                 budget policy, inference tables); set the UC @champion alias
@@ -111,6 +117,14 @@ databricks apps deploy <app-name> \
   endpoint `budget_policy_id`; the *Description* and *Tags* are applied at creation.
 - **Deploy job** — carries its own `budget_policy_id` + tags (configurable via `deploy-job` bundle
   variables) so the deployment compute is attributed.
+
+## Tags / metadata
+
+The form's **Tags** field is a free-form JSON object; each key/value is applied to the serving
+endpoint and persisted in `model_deployments.tags`. Beyond chargeback (`cost_center`, `team`), this
+is the extensible place for **governance/ownership metadata** — e.g. use-case / APMS ID, business /
+technical / support owner, environment, GxP classification, deployment mode — without any schema
+change, so new fields can be added as more workloads onboard.
 
 ## Credits
 
