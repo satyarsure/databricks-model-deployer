@@ -6,6 +6,40 @@ import type { DeploymentRow, PendingDeployment } from './types';
 
 type Tab = 'deployed' | 'deploy';
 
+// A just-submitted deployment is shown optimistically until the deploy job writes its
+// first row. Persist it so a hard page reload during the job's cold-start window (before
+// any DB row exists) still shows the in-progress deployment instead of dropping it.
+const PENDING_KEY = 'modelDeployer.pending';
+const PENDING_TTL_MS = 20 * 60 * 1000; // stop showing a stale optimistic row after 20 min
+
+function loadPending(): PendingDeployment | null {
+  try {
+    const raw = sessionStorage.getItem(PENDING_KEY);
+    if (!raw) return null;
+    const p = JSON.parse(raw) as PendingDeployment & { _ts?: number };
+    if (!p.deployment_id || (p._ts && Date.now() - p._ts > PENDING_TTL_MS)) {
+      sessionStorage.removeItem(PENDING_KEY);
+      return null;
+    }
+    return {
+      deployment_id: p.deployment_id,
+      model_name: p.model_name,
+      uc_full_name: p.uc_full_name,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function savePending(p: PendingDeployment | null) {
+  try {
+    if (p) sessionStorage.setItem(PENDING_KEY, JSON.stringify({ ...p, _ts: Date.now() }));
+    else sessionStorage.removeItem(PENDING_KEY);
+  } catch {
+    /* sessionStorage unavailable — optimistic row just won't survive a reload */
+  }
+}
+
 function tabClass(active: boolean) {
   return `relative px-1 pb-3 pt-2 text-sm font-medium transition-colors ${
     active
@@ -17,8 +51,14 @@ function tabClass(active: boolean) {
 export default function App() {
   const [tab, setTab] = useState<Tab>('deployed');
   const [prefill, setPrefill] = useState<DeploymentRow | null>(null);
-  const [pending, setPending] = useState<PendingDeployment | null>(null);
+  const [pending, setPendingState] = useState<PendingDeployment | null>(() => loadPending());
   const [email, setEmail] = useState('');
+
+  // Keep sessionStorage in sync so the optimistic row survives a reload.
+  const setPending = (p: PendingDeployment | null) => {
+    setPendingState(p);
+    savePending(p);
+  };
 
   useEffect(() => {
     fetch('/api/whoami')

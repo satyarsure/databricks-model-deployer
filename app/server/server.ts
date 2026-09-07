@@ -39,6 +39,11 @@ const deploySpecSchema = z.object({
 });
 
 createApp({
+  // This is a live deployment-status board: the deployments list and lifecycle timeline
+  // must always reflect current state. AppKit's analytics query cache is on by default and
+  // can serve a stale list (e.g. hiding an in-progress deployment after a page reload), so
+  // disable it — the queries are small and run on the warehouse each time.
+  cache: { enabled: false },
   plugins: [
     analytics(),
     jobs({
