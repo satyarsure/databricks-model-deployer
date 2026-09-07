@@ -74,7 +74,7 @@ function StatusBadge({ status }: { status: string | null }) {
   }
   return (
     <span
-      className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium ${cls}`}
+      className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-full px-2.5 py-0.5 text-xs font-medium ${cls}`}
     >
       <span className="h-1.5 w-1.5 rounded-full bg-current opacity-70" />
       {label}
@@ -314,15 +314,23 @@ function DeploymentsTable({
 
   return (
     <div className="overflow-x-auto">
-      <table className="w-full text-sm">
+      <table className="w-full min-w-[860px] table-fixed text-sm">
+        <colgroup>
+          <col className="w-[22%]" />
+          <col className="w-[28%]" />
+          <col className="w-[11%]" />
+          <col className="w-[13%]" />
+          <col className="w-[14%]" />
+          <col className="w-[12%]" />
+        </colgroup>
         <thead>
           <tr className="border-b text-left text-xs uppercase tracking-wide text-muted-foreground">
-            <th className="px-4 py-3 font-medium">Model Name</th>
-            <th className="px-4 py-3 font-medium">UC Name</th>
-            <th className="px-4 py-3 font-medium">Version</th>
-            <th className="px-4 py-3 font-medium">Deploy Date</th>
-            <th className="px-4 py-3 font-medium">Status</th>
-            <th className="px-4 py-3 font-medium">Serving</th>
+            <th className="whitespace-nowrap px-4 py-3 font-medium">Model Name</th>
+            <th className="whitespace-nowrap px-4 py-3 font-medium">UC Name</th>
+            <th className="whitespace-nowrap px-4 py-3 font-medium">Version</th>
+            <th className="whitespace-nowrap px-4 py-3 font-medium">Deploy Date</th>
+            <th className="whitespace-nowrap px-4 py-3 font-medium">Status</th>
+            <th className="whitespace-nowrap px-4 py-3 font-medium">Serving</th>
           </tr>
         </thead>
         <tbody>
@@ -334,12 +342,12 @@ function DeploymentsTable({
               <Fragment key={r.deployment_id}>
               <tr className="border-b last:border-0 hover:bg-muted/40">
                 <td className="px-4 py-3">
-                  <div className="flex items-center gap-2">
+                  <div className="flex min-w-0 items-center gap-2">
                     <button
                       type="button"
                       onClick={() => onToggleExpand(r.deployment_id)}
                       title={open ? 'Hide lifecycle' : 'Show lifecycle'}
-                      className="text-muted-foreground hover:text-foreground"
+                      className="shrink-0 text-muted-foreground hover:text-foreground"
                       aria-label="Toggle lifecycle"
                     >
                       {open ? (
@@ -351,30 +359,32 @@ function DeploymentsTable({
                     <button
                       type="button"
                       onClick={() => onDeployVersion(r)}
-                      title="Deploy a new version of this model"
-                      className="whitespace-nowrap font-medium text-primary hover:underline"
+                      title={r.model_name ?? undefined}
+                      className="truncate font-medium text-primary hover:underline"
                     >
                       {r.model_name ?? '—'}
                     </button>
                   </div>
                 </td>
-                <td className="px-4 py-3 font-mono text-xs text-muted-foreground">
+                <td className="px-4 py-3">
                   <span
-                    className="block max-w-[240px] truncate"
+                    className="block truncate font-mono text-xs text-muted-foreground"
                     title={r.uc_full_name ?? ''}
                   >
                     {r.uc_full_name ?? '—'}
                   </span>
                 </td>
-                <td className="px-4 py-3">{r.model_version ?? '—'}</td>
-                <td className="px-4 py-3 text-muted-foreground">
+                <td className="whitespace-nowrap px-4 py-3 font-mono text-xs">
+                  {r.model_version ?? '—'}
+                </td>
+                <td className="whitespace-nowrap px-4 py-3 text-muted-foreground">
                   {formatDate(r.deployed_date)}
                 </td>
                 <td className="px-4 py-3">
                   <StatusBadge status={r.status} />
                   {r.status === 'FAILED' && r.error_message && (
                     <div
-                      className="mt-1 max-w-[200px] truncate text-xs text-muted-foreground"
+                      className="mt-1 truncate text-xs text-muted-foreground"
                       title={r.error_message}
                     >
                       {r.error_message}
