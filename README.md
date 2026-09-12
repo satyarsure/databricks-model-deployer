@@ -85,6 +85,11 @@ table on first run.)
 
 ## Deploy
 
+> **Installing in a new / client workspace?** See **[INSTALL.md](INSTALL.md)** for the full runbook —
+> prerequisites, required access/permissions, UC provisioning, the deploy order (and its
+> bootstrapping steps), verification, and troubleshooting. The steps below are the quick reference
+> for a workspace that's already provisioned.
+
 Uses your Databricks CLI profile for the workspace host (pass `--profile <PROFILE>`).
 
 ```bash
@@ -110,6 +115,10 @@ databricks apps deploy <app-name> \
   compute, tags, schemas, budget policy, timestamps). Source of truth for the Deployed Models list.
 - **`model_lifecycle_events`** — append-only audit trail of every stage/status transition.
 - **`artifacts`** volume — holds uploaded/test model artifacts.
+
+The `catalog`/`schema` and the `artifacts` volume must be provisioned up front (UC admin/location);
+the deploy job **self-creates** the two Delta tables on its first run (`CREATE TABLE IF NOT EXISTS`),
+so no manual table DDL is required. See [INSTALL.md](INSTALL.md).
 
 ## Chargeback
 

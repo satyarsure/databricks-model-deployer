@@ -124,6 +124,32 @@ def log_event(stage, status, message="", version=""):
         print(f"[lifecycle] could not log event: {le}")
 
 # COMMAND ----------
+# ---- Ensure the status + lifecycle tables exist (idempotent, self-provisioning) ---------
+# So a fresh workspace needs no manual table DDL — only the catalog/schema/volume (which
+# require UC admin/location) are pre-provisioned. CREATE TABLE IF NOT EXISTS is a no-op once
+# the tables exist. Keep these column lists in sync with merge_status()/log_event() and the
+# app's config/queries/*.sql.
+spark.sql(f"""
+    CREATE TABLE IF NOT EXISTS {TABLE} (
+      deployment_id BIGINT, model_name STRING, description STRING,
+      uc_catalog STRING, uc_schema STRING, uc_model STRING, uc_full_name STRING,
+      model_version STRING, experiment_name STRING, eval_dataset STRING,
+      serverless_usage_policy STRING, tags STRING,
+      compute_type STRING, gpu_type STRING, compute_size STRING, scale_to_zero BOOLEAN,
+      artifacts_json STRING, input_schema_json STRING, output_schema_json STRING,
+      endpoint_name STRING, invoke_url STRING, status STRING, stage STRING, error_message STRING,
+      deployed_by STRING, deployed_date TIMESTAMP, updated_at TIMESTAMP, run_id STRING
+    ) USING DELTA
+""")
+spark.sql(f"""
+    CREATE TABLE IF NOT EXISTS {LIFECYCLE_TABLE} (
+      event_id BIGINT, deployment_id BIGINT, model_name STRING, uc_full_name STRING,
+      model_version STRING, stage STRING, status STRING, message STRING,
+      actor STRING, event_time TIMESTAMP
+    ) USING DELTA
+""")
+
+# COMMAND ----------
 # ---- Record the initial IN_PROGRESS row -------------------------------------
 uc = spec.get("uc", {}) or {}
 compute = spec.get("compute", {}) or {}
