@@ -26,7 +26,7 @@ React/AppKit app
 Deploy job (DABs, serverless) — one notebook, three stages:
    Wrapper    → load artifact(s), wrap as MLflow pyfunc, build signature, register each new-artifact
                 variant to UC (a variant may instead reference an existing registered version)
-   Validator  → load the registered pyfunc, smoke-test predict, optional mlflow.evaluate vs an eval dataset
+   Validator  → load the registered pyfunc, smoke-test predict, mlflow.evaluate vs the (required) eval dataset
    Deployer   → create/update the serving endpoint (traffic split, compute, scale-to-zero, tags,
                 budget policy, inference tables); set the UC @champion alias
    (every stage writes status to model_deployments and appends to model_lifecycle_events)

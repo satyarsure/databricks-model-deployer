@@ -370,6 +370,7 @@ export function DeployModel({
     const outCheck = parseSchema(outputSchemaText, true);
     if (!outCheck.ok) return `Output schema ${outCheck.error}.`;
     if (!experimentName.trim()) return 'Experiment name is required.';
+    if (!evalDataset.trim()) return 'Evaluation dataset is required.';
     if (!ucCatalog.trim() || !ucSchema.trim() || !ucModel.trim())
       return 'UC catalog, schema, and model are all required.';
     if (!usagePolicy.trim()) return 'Serverless usage policy is required.';
@@ -660,10 +661,13 @@ export function DeployModel({
           />
         </Section>
 
-        <Section title="Evaluation dataset location" hint="S3 or UC Volume path (optional).">
+        <Section
+          title="Evaluation dataset location"
+          hint="Required. S3 or UC Volume path to a CSV/Parquet with the model's features plus a target column named like the output field (validated with mlflow.evaluate)."
+        >
           <input
             className={inputCls}
-            placeholder="s3://bucket/eval/dataset.parquet  or  /Volumes/catalog/schema/vol/eval"
+            placeholder="s3://bucket/eval/dataset.parquet  or  /Volumes/catalog/schema/vol/eval.csv"
             value={evalDataset}
             onChange={(e) => setEvalDataset(e.target.value)}
           />

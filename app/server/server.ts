@@ -51,7 +51,7 @@ const deploySpecSchema = z.object({
   input_schema: z.array(fieldSchema).default([]),
   output_schema: z.array(fieldSchema).min(1),
   experiment_name: z.string().min(1),
-  eval_dataset: z.string().optional().default(''),
+  eval_dataset: z.string().min(1),
   serverless_usage_policy: z.string().min(1),
   tags: z.record(z.string(), z.any()).default({}),
   uc: z.object({
