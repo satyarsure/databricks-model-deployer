@@ -370,7 +370,6 @@ export function DeployModel({
     const outCheck = parseSchema(outputSchemaText, true);
     if (!outCheck.ok) return `Output schema ${outCheck.error}.`;
     if (!experimentName.trim()) return 'Experiment name is required.';
-    if (!evalDataset.trim()) return 'Evaluation dataset is required.';
     if (!ucCatalog.trim() || !ucSchema.trim() || !ucModel.trim())
       return 'UC catalog, schema, and model are all required.';
     if (!usagePolicy.trim()) return 'Serverless usage policy is required.';
@@ -663,7 +662,7 @@ export function DeployModel({
 
         <Section
           title="Evaluation dataset location"
-          hint="Required. S3 or UC Volume path to a CSV/Parquet with the model's features plus a target column named like the output field (validated with mlflow.evaluate)."
+          hint="Optional — leave blank to skip. If given, an S3/UC Volume CSV or Parquet with the model's features plus a target column named like the output field; validated with mlflow.evaluate."
         >
           <input
             className={inputCls}

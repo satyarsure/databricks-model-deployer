@@ -47,14 +47,12 @@ path, an A/B traffic split, and two failure paths — every stage of
 > **Input / Output schema** are entered as **JSON strings** — paste the JSON blocks verbatim.
 > **Tags** is a JSON object. Every feature type is `double`; classifier outputs use `long`.
 >
-> **Evaluation dataset** is **required** for every deployment: a CSV/Parquet path whose columns are
-> the model's features **plus a target column named exactly like the output-schema field** (e.g.
-> `price`, `prediction`, `churn`, `risk_class`). When that target column is present the validator
-> runs `mlflow.evaluate` — **classifier** metrics when the output field is `long`/integer,
-> **regressor** metrics otherwise. If the target column is missing it just scores the rows.
-> Evaluation itself is non-fatal (a bad eval file logs a warning and the deployment still completes),
-> but the form/API won't accept an empty path. For the failure cases (TC5/TC6) any valid path works —
-> they fail before evaluation is reached.
+> **Evaluation dataset** is **optional** — leave it blank to skip evaluation. When provided, it's a
+> CSV/Parquet path whose columns are the model's features **plus a target column named exactly like
+> the output-schema field** (e.g. `price`, `prediction`, `churn`, `risk_class`). With that target
+> column present the validator runs `mlflow.evaluate` — **classifier** metrics when the output field
+> is `long`/integer, **regressor** metrics otherwise; if the target column is missing it just scores
+> the rows. Evaluation is non-fatal: a bad eval file logs a warning and the deployment still completes.
 
 ---
 
@@ -293,7 +291,7 @@ with the error message.
 | Model Name | `bad-schema-test` |
 | Artifact | UC Volume · `.../test_models/house_price_linreg.pkl` |
 | Experiment name | `<experiment>` |
-| Evaluation dataset | `/Volumes/<catalog>/<schema>/<volume>/test_models/house_price_eval.csv` *(required to submit; not reached — validation fails first)* |
+| Evaluation dataset | *(leave blank)* |
 | UC Model name | `<catalog>` · `<schema>` · `house_price_badschema` |
 | Serverless usage policy | `<budget-policy-id>` |
 | Compute | CPU · SMALL |
@@ -325,7 +323,7 @@ Point at a file that isn't a model. The **wrapper** stage fails to load the arti
 | Model Name | `broken-artifact-test` |
 | Artifact | UC Volume · `.../test_models/not_a_model.txt` |
 | Experiment name | `<experiment>` |
-| Evaluation dataset | `/Volumes/<catalog>/<schema>/<volume>/test_models/house_price_eval.csv` *(required to submit; not reached — wrapper fails first)* |
+| Evaluation dataset | *(leave blank)* |
 | UC Model name | `<catalog>` · `<schema>` · `broken_artifact` |
 | Serverless usage policy | `<budget-policy-id>` |
 | Compute | CPU · SMALL |
