@@ -109,6 +109,14 @@ databricks apps deploy <app-name> \
 > Apps runtime installs dependencies and builds the app on its own compute. App logs require an OAuth
 > profile: `databricks apps logs <app-name> -p <oauth-profile>`.
 
+> **Git provenance:** `databricks bundle deploy` auto-detects the git repo of the directory it runs
+> in and stamps its **origin URL / branch / commit** onto the deployed job & app (shown in the Jobs UI
+> as *"Bundle repository URL"*) — there is no bundle setting that reliably blanks this. To avoid
+> recording a source-repo URL in a client workspace, **deploy from a non-git copy** (unpack the
+> delivered archive, or `rm -rf .git` in the checkout) so nothing is recorded; deploying from your own
+> internal Git records only your origin, never the vendor's. See [INSTALL.md](INSTALL.md) → *Git
+> provenance*.
+
 ## Data model (Unity Catalog: `<catalog>.<schema>`)
 
 - **`model_deployments`** — one row per deployment (name, UC name, version, status/stage, endpoint,

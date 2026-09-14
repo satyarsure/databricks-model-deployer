@@ -39,12 +39,31 @@ on that machine — no dependency on any other environment.
    # macOS/Linux: curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
    # Windows:     winget install Databricks.DatabricksCLI
    ```
-2. **Git** and access to the repo, cloned onto the VDI:
+2. **The source code on the VDI.** Get it onto the VDI and unpack it into a working directory, e.g.
+   `model-deployer/`. Two supported ways (see the box below on **git provenance** — it decides which
+   to use):
    ```bash
-   git clone https://github.com/satyarsure/databricks-model-deployer.git
-   cd databricks-model-deployer
+   # A) delivered as an archive (recommended for a clean handover — no git metadata)
+   unzip model-deployer.zip -d model-deployer && cd model-deployer
+
+   # B) kept in your own internal Git
+   git clone <YOUR_INTERNAL_GIT_REMOTE_URL> model-deployer && cd model-deployer
    ```
-   (If the VDI has no GitHub access, copy the repo across as a zip.)
+
+   > **⚠️ Git provenance — how to avoid recording a source-repo URL.**
+   > `databricks bundle deploy` auto-detects the git repository of the directory it runs in and
+   > stamps its **origin URL, branch, and commit** onto the deployed job/app (shown in the Jobs UI
+   > as *"Bundle repository URL"*). There is **no** bundle setting that reliably blanks this — the
+   > CLI re-detects at deploy time. So control it by choosing where you deploy from:
+   > - **Deploy from a non-git copy (A)** → the unpacked archive has no `.git`, so **nothing** is
+   >   recorded (no URL, branch, or commit). This is the clean handover.
+   > - **Deploy from your own Git (B)** → only **your** origin/branch/commit is recorded, never the
+   >   vendor's — which is fine and expected.
+   > - **Do NOT** deploy from a checkout that still points at the vendor's remote. If you received a
+   >   `git clone` of the vendor repo, strip its history first:
+   >   ```bash
+   >   rm -rf .git      # removes vendor origin/branch/commit; deploy now records no git metadata
+   >   ```
 3. **No Node.js/npm needed locally** — the Databricks Apps runtime runs `npm install` + build on its
    own compute. (Local build is intentionally not required.)
 4. Network access from the VDI to `<WORKSPACE_URL>` (443).
