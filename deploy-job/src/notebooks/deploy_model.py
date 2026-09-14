@@ -317,11 +317,19 @@ try:
                 edf = pd.read_parquet(eval_path) if eval_path.endswith(".parquet") else (
                     pd.read_csv(eval_path) if eval_path.endswith(".csv") else None)
                 if edf is not None:
-                    out_fields = [f["name"] for f in spec.get("output_schema", [])]
-                    target = out_fields[0] if out_fields and out_fields[0] in edf.columns else None
+                    out_fields = spec.get("output_schema", [])
+                    target_field = out_fields[0] if out_fields else None
+                    target = (target_field["name"] if target_field
+                              and target_field["name"] in edf.columns else None)
                     if target:
-                        mlflow.evaluate(model=model_uri, data=edf, targets=target, model_type="regressor")
-                        print("[validator] mlflow.evaluate complete")
+                        # Integer-typed outputs are class labels → classifier metrics;
+                        # everything else → regressor metrics.
+                        ftype = str((target_field or {}).get("type", "")).lower()
+                        model_type = ("classifier"
+                                      if ftype in ("long", "int", "integer", "bigint")
+                                      else "regressor")
+                        mlflow.evaluate(model=model_uri, data=edf, targets=target, model_type=model_type)
+                        print(f"[validator] mlflow.evaluate complete (model_type={model_type})")
                     else:
                         model.predict(edf.head(50)); print("[validator] eval dataset scored")
             except Exception as ee:

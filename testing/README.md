@@ -21,8 +21,11 @@ path, an A/B traffic split, and two failure paths — every stage of
    | `churn_logreg.pkl` | LogisticRegression | tenure, monthly_charges, total_charges → 0/1 |
    | `churn_rf.pkl` | RandomForestClassifier | same 3 features → 0/1 |
    | `credit_risk_gbc.pkl` | GradientBoostingClassifier | income, age, loan_amount, credit_score → 0/1/2 |
-   | `house_price_eval.csv` | eval dataset | includes the `price` target column |
-   | `energy_eval.csv` | eval dataset | includes the `energy_kwh` target column |
+   | `house_price_eval.csv` | eval dataset (regressor) | includes the `price` target column |
+   | `energy_eval.csv` | eval dataset (regressor) | includes the `energy_kwh` target column |
+   | `iris_eval.csv` | eval dataset (classifier) | includes the `prediction` target column |
+   | `churn_eval.csv` | eval dataset (classifier) | includes the `churn` target column |
+   | `credit_risk_eval.csv` | eval dataset (classifier) | includes the `risk_class` target column |
    | `not_a_model.txt` | (not a model) | used by the wrapper-failure test |
 
 2. **Fill in your environment values** (used throughout the cases below):
@@ -43,6 +46,13 @@ path, an A/B traffic split, and two failure paths — every stage of
 
 > **Input / Output schema** are entered as **JSON strings** — paste the JSON blocks verbatim.
 > **Tags** is a JSON object. Every feature type is `double`; classifier outputs use `long`.
+>
+> **Evaluation dataset** (optional per deployment): a CSV/Parquet path whose columns are the model's
+> features **plus a target column named exactly like the output-schema field** (e.g. `price`,
+> `prediction`, `churn`, `risk_class`). When that target column is present the validator runs
+> `mlflow.evaluate` — **classifier** metrics when the output field is `long`/integer, **regressor**
+> metrics otherwise. If the target column is missing it just scores the rows. Evaluation is
+> non-fatal: a bad eval file logs a warning and the deployment still completes.
 
 ---
 
@@ -56,7 +66,7 @@ Baseline sanity check: one artifact, minimal compute, no eval dataset.
 | Description | `Linear regression predicting home price` |
 | Artifact | UC Volume · `/Volumes/<catalog>/<schema>/<volume>/test_models/house_price_linreg.pkl` |
 | Experiment name | `<experiment>` |
-| Evaluation dataset | *(leave blank)* |
+| Evaluation dataset | `/Volumes/<catalog>/<schema>/<volume>/test_models/house_price_eval.csv` |
 | UC Model name | Catalog `<catalog>` · Schema `<schema>` · Model `house_price_model` |
 | Serverless usage policy | `<budget-policy-id>` |
 | Compute | CPU · SMALL · Scale-to-zero **ON** |
@@ -79,8 +89,9 @@ Tags:
 { "team": "ds-housing", "env": "test" }
 ```
 
-**Expected:** lifecycle runs wrapper → validator → deployer → **Complete**; endpoint
-`house_price_model_endpoint` becomes READY; `@champion` alias set on v1.
+**Expected:** lifecycle runs wrapper → validator → deployer → **Complete**; the validator logs
+`mlflow.evaluate complete (model_type=regressor)` (the eval CSV's `price` column matches the output
+field); endpoint `house_price_model_endpoint` becomes READY; `@champion` alias set on v1.
 
 **Query it:**
 ```bash
@@ -148,6 +159,7 @@ Classifier with an integer (`long`) output.
 | Description | `Iris species random forest` |
 | Artifact | UC Volume · `/Volumes/<catalog>/<schema>/<volume>/test_models/iris_rf.pkl` |
 | Experiment name | `<experiment>` |
+| Evaluation dataset | `/Volumes/<catalog>/<schema>/<volume>/test_models/iris_eval.csv` |
 | UC Model name | `<catalog>` · `<schema>` · `iris_classifier` |
 | Serverless usage policy | `<budget-policy-id>` |
 | Compute | CPU · SMALL · Scale-to-zero ON |
@@ -170,7 +182,9 @@ Tags:
 { "team": "ml-research" }
 ```
 
-**Expected:** **Complete**; `iris_classifier_endpoint` READY.
+**Expected:** validator logs `mlflow.evaluate complete (model_type=classifier)` — the `prediction`
+output field is `long`, so classifier metrics are computed against the eval CSV's `prediction`
+column; **Complete**; `iris_classifier_endpoint` READY.
 
 **Query it:**
 ```bash
@@ -199,6 +213,7 @@ footer must read **Traffic total: 100%** before Save is allowed.
 | Variant **A** | UC Volume · `.../test_models/churn_logreg.pkl` · Traffic **70** |
 | Variant **B** | UC Volume · `.../test_models/churn_rf.pkl` · Traffic **30** |
 | Experiment name | `<experiment>` |
+| Evaluation dataset | `/Volumes/<catalog>/<schema>/<volume>/test_models/churn_eval.csv` |
 | UC Model name | `<catalog>` · `<schema>` · `churn_predictor` |
 | Serverless usage policy | `<budget-policy-id>` |
 | Compute | CPU · SMALL · Scale-to-zero ON |
@@ -220,8 +235,9 @@ Tags:
 { "team": "growth", "experiment": "churn-ab" }
 ```
 
-**Expected:** two model versions registered (e.g. `A:1,B:2`); endpoint `churn_predictor_endpoint`
-has **two served entities** with a **70/30** traffic split; **Complete**.
+**Expected:** two model versions registered (e.g. `A:1,B:2`); the validator runs
+`mlflow.evaluate` (classifier) against `churn_eval.csv` for **each** variant; endpoint
+`churn_predictor_endpoint` has **two served entities** with a **70/30** traffic split; **Complete**.
 
 **Verify the split:**
 ```bash
@@ -349,6 +365,7 @@ Bigger compute, always-on, richer tag set (chargeback).
 | Description | `Gradient-boosted 3-class credit risk` |
 | Artifact | UC Volume · `.../test_models/credit_risk_gbc.pkl` |
 | Experiment name | `<experiment>` |
+| Evaluation dataset | `/Volumes/<catalog>/<schema>/<volume>/test_models/credit_risk_eval.csv` |
 | UC Model name | `<catalog>` · `<schema>` · `credit_risk` |
 | Serverless usage policy | `<budget-policy-id>` |
 | Compute | CPU · LARGE · Scale-to-zero **OFF** |
@@ -371,8 +388,10 @@ Tags:
 { "team": "risk", "cost_center": "cc-9001", "pii": "false", "env": "test" }
 ```
 
-**Expected:** **Complete**; `credit_risk_endpoint` READY; endpoint tags include the chargeback
-values; endpoint budget policy = your `<budget-policy-id>` (visible under the endpoint's details).
+**Expected:** validator logs `mlflow.evaluate complete (model_type=classifier)` against
+`credit_risk_eval.csv` (the `risk_class` output is `long`); **Complete**; `credit_risk_endpoint`
+READY; endpoint tags include the chargeback values; endpoint budget policy = your
+`<budget-policy-id>` (visible under the endpoint's details).
 
 **Query it:**
 ```bash

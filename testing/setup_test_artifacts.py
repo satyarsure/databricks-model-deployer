@@ -1,8 +1,8 @@
 # Databricks notebook source
 # MAGIC %md
 # MAGIC # Manual-testing fixtures for the Model Deployer
-# MAGIC Trains a handful of small scikit-learn models and writes them (plus two eval
-# MAGIC datasets) to a UC Volume so the Deploy Model form has real artifacts to point at.
+# MAGIC Trains a handful of small scikit-learn models and writes them (plus an eval
+# MAGIC dataset per model) to a UC Volume so the Deploy Model form has real artifacts to point at.
 # MAGIC
 # MAGIC All artifacts land under `/<catalog>/<schema>/<volume>/test_models/`.
 # MAGIC Nothing here is environment-specific — pass your catalog/schema/volume as widgets.
@@ -91,6 +91,14 @@ from sklearn.datasets import load_iris
 iris = load_iris()
 save(RandomForestClassifier(n_estimators=50, random_state=0).fit(iris.data, iris.target),
      "iris_rf.pkl")
+# Iris eval dataset — target column "prediction" matches the classifier's output-schema field
+# (integer/long output → classifier metrics in mlflow.evaluate).
+pd.DataFrame({
+    "sepal_length": iris.data[:, 0], "sepal_width": iris.data[:, 1],
+    "petal_length": iris.data[:, 2], "petal_width": iris.data[:, 3],
+    "prediction": iris.target,
+}).to_csv(f"{BASE}/iris_eval.csv", index=False)
+print("  saved", f"{BASE}/iris_eval.csv")
 
 # COMMAND ----------
 # 4) Churn A/B pair ── features: tenure, monthly_charges, total_charges → churn 0/1
@@ -102,6 +110,12 @@ churn = ((monthly / 120 - tenure / 72) + rng.normal(0, 0.15, n) > 0).astype(int)
 Xch = np.column_stack([tenure, monthly, total])
 save(LogisticRegression(max_iter=1000).fit(Xch, churn), "churn_logreg.pkl")
 save(RandomForestClassifier(n_estimators=60, random_state=0).fit(Xch, churn), "churn_rf.pkl")
+# Churn eval dataset — target column "churn" matches the output-schema field (used by both A/B variants).
+pd.DataFrame({
+    "tenure": tenure[:100], "monthly_charges": monthly[:100],
+    "total_charges": total[:100], "churn": churn[:100],
+}).to_csv(f"{BASE}/churn_eval.csv", index=False)
+print("  saved", f"{BASE}/churn_eval.csv")
 
 # COMMAND ----------
 # 5) Credit-risk GRADIENT-BOOSTING CLASSIFIER (multiclass) ── income, age, loan_amount, credit_score → 0/1/2
@@ -114,6 +128,12 @@ raw = (score / 850) - (loan / 100000) + (income / 200000) - (cage / 200)
 risk = np.digitize(raw, bins=[0.4, 0.8])  # → 0 (high), 1 (medium), 2 (low)
 Xcr = np.column_stack([income, cage, loan, score])
 save(GradientBoostingClassifier(random_state=0).fit(Xcr, risk), "credit_risk_gbc.pkl")
+# Credit-risk eval dataset — target column "risk_class" matches the output-schema field.
+pd.DataFrame({
+    "income": income[:100], "age": cage[:100], "loan_amount": loan[:100],
+    "credit_score": score[:100], "risk_class": risk[:100],
+}).to_csv(f"{BASE}/credit_risk_eval.csv", index=False)
+print("  saved", f"{BASE}/credit_risk_eval.csv")
 
 # COMMAND ----------
 # 6) A non-model file for the "wrapper fails to load an artifact" negative test.
@@ -125,6 +145,6 @@ print("  saved", f"{BASE}/not_a_model.txt")
 print("\nDONE. Artifacts written:")
 for p in saved:
     print(" ", p)
-print("  " + f"{BASE}/house_price_eval.csv")
-print("  " + f"{BASE}/energy_eval.csv")
-print("  " + f"{BASE}/not_a_model.txt")
+for e in ["house_price_eval.csv", "energy_eval.csv", "iris_eval.csv",
+          "churn_eval.csv", "credit_risk_eval.csv", "not_a_model.txt"]:
+    print("  " + f"{BASE}/{e}")
