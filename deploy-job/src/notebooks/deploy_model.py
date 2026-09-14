@@ -328,12 +328,26 @@ try:
                         model_type = ("classifier"
                                       if ftype in ("long", "int", "integer", "bigint")
                                       else "regressor")
-                        mlflow.evaluate(model=model_uri, data=edf, targets=target, model_type=model_type)
+                        # Score with the model, then evaluate as a static dataset. The pyfunc
+                        # wraps single-output predictions as a 1-column DataFrame; squeeze to a
+                        # 1-D vector so metric computation doesn't hit a predictions/targets
+                        # dimension mismatch (model-driven evaluate fails otherwise).
+                        feats = edf.drop(columns=[target])
+                        preds = np.asarray(model.predict(feats)).squeeze()
+                        edf_eval = feats.copy()
+                        edf_eval[target] = edf[target].values
+                        edf_eval["prediction_"] = preds
+                        mlflow.evaluate(data=edf_eval, predictions="prediction_",
+                                        targets=target, model_type=model_type)
                         print(f"[validator] mlflow.evaluate complete (model_type={model_type})")
                     else:
                         model.predict(edf.head(50)); print("[validator] eval dataset scored")
             except Exception as ee:
+                # Non-fatal, but surface it on the lifecycle timeline so a skipped/broken
+                # evaluation is visible instead of silently swallowed.
                 print(f"[validator] evaluation warning (non-fatal): {ee}")
+                log_event("validator", "IN_PROGRESS", f"evaluation skipped: {str(ee)[:300]}",
+                          version=globals().get("model_version_str", ""))
     merge_status(stage="validated")
     log_event("validator", "IN_PROGRESS", "validation passed", version=globals().get("model_version_str", ""))
 except Exception as e:

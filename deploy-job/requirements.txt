@@ -5,7 +5,9 @@
 #
 # Keep this in sync with testing/setup_test_artifacts.py so fixture pickles are created
 # with the same scikit-learn/numpy/pandas the job (and serving container) will load them with.
-mlflow-skinny[databricks]==2.16.2
+# Full mlflow (not mlflow-skinny): the validator uses mlflow.evaluate, which the skinny
+# client does not include — with skinny it raised and was silently skipped.
+mlflow[databricks]==2.16.2
 databricks-sdk==0.68.0
 scikit-learn==1.4.2
 pandas==2.2.2
