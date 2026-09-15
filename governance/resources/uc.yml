@@ -18,7 +18,9 @@ resources:
   volumes:
     artifacts:
       catalog_name: ${var.catalog}
-      schema_name: ${var.schema}
+      # Reference the managed schema resource (not ${var.schema}) so DABs orders the schema
+      # create before the volume on a first deploy.
+      schema_name: ${resources.schemas.app_schema.name}
       name: artifacts
       volume_type: MANAGED
       comment: Model Deployer — uploaded/test model artifacts

@@ -17,17 +17,17 @@ include:
 # ("[dev you]<schema>"), which must stay exact. Deploy with `-t <env> --profile <env>`.
 
 variables:
+  # No defaults on purpose: this bundle OWNS the schema/volume, so a defaults-only deploy must not
+  # silently target a real shared schema (e.g. main.default) or emit an empty grant principal.
+  # A deploy without values.local.yml fails fast with "no value assigned to variable ...".
   catalog:
-    description: UC catalog that holds the schema + artifacts volume
-    default: main
+    description: UC catalog that holds the schema + artifacts volume (required)
   schema:
-    description: UC schema for model_deployments / model_lifecycle_events + the artifacts volume
-    default: default
+    description: UC schema for model_deployments / model_lifecycle_events + the artifacts volume (required)
   app_grantee:
     description: >-
-      Principal granted read access. Prefer a UC GROUP (avoids the app service-principal
+      Principal granted read access (required). Prefer a UC GROUP (avoids the app service-principal
       chicken-and-egg: the app SP id is not a bundle reference), or pass the app SP application-id.
-    default: ""
 
 targets:
   dev:

@@ -286,8 +286,8 @@ targets:
 ### 6c. Create the app (uploads source + creates the app and its service principal)
 ```bash
 cd app
-databricks bundle validate           --profile <PROFILE>   # add -t <env> for qa/prod
-databricks bundle deploy -t default  --profile <PROFILE>   # -t <env> if you defined dev/qa/prod targets
+databricks bundle validate       --profile <PROFILE>   # add -t <env> for qa/prod
+databricks bundle deploy -t dev  --profile <PROFILE>   # dev is the default target; use -t qa / -t prod for those
 databricks apps get <APP_NAME> --profile <PROFILE> -o json   # note service_principal_* -> <APP_SP_ID>
 ```
 
@@ -342,39 +342,19 @@ cd ..
 > Deploy `governance/` **only** in an environment where you want DABs to own the schema/volume — in
 > one where they already exist unmanaged, a deploy would conflict; keep the manual SQL there instead.
 
-Its `resources/uc.yml` is:
-
-```yaml
-variables:
-  catalog: {}
-  schema: {}
-  app_grantee:
-    description: UC group (recommended) or app SP application-id that gets read access
-
-resources:
-  schemas:
-    app_schema:
-      catalog_name: ${var.catalog}
-      name: ${var.schema}
-      grants:
-        - principal: ${var.app_grantee}
-          privileges: [USE_SCHEMA, SELECT]     # SELECT here covers every table in the schema
-      lifecycle: { prevent_destroy: true }     # don't drop the schema (and its data) on `bundle destroy`
-  volumes:
-    artifacts:
-      catalog_name: ${var.catalog}
-      schema_name: ${var.schema}
-      name: artifacts
-      grants:
-        - principal: ${var.app_grantee}
-          privileges: [READ_VOLUME]            # add WRITE_VOLUME if users upload artifacts via UC
-      lifecycle: { prevent_destroy: true }
-```
+The bundle definition lives in **`governance/resources/uc.yml`** (a managed `Schema` + `Volume`, each
+with a `grants:` block; the volume's `schema_name` references the managed schema so it's created first).
+Its variables (`catalog`, `schema`, `app_grantee`) have **no defaults** on purpose — a defaults-only
+deploy would otherwise silently target a real shared schema or emit an empty grant principal, so an
+un-configured deploy fails fast with "no value assigned to variable ...".
 
 `USE CATALOG` on a shared/pre-existing catalog stays a one-line manual grant (or add a bundle-managed
-`catalogs:` resource grant if the bundle owns the catalog). Note that a bundle-managed schema/volume is
-**owned by the bundle** — `bundle destroy` would drop it, so keep `prevent_destroy: true` on for qa/prod
-(and be aware the bundle now reconciles those UC objects on every deploy).
+`catalogs:` resource grant if the bundle owns the catalog). A bundle-managed schema/volume is **owned by
+the bundle** — a `bundle destroy` would otherwise drop it (and its data), which is why the resources set
+`lifecycle: { prevent_destroy: true }`. `prevent_destroy` is a supported DABs lifecycle field; confirm
+it blocks destroy on your pinned CLI before relying on it in prod, and treat "don't run
+`bundle destroy` against prod" as the real safeguard. Note the bundle reconciles those UC objects on
+every deploy.
 
 > **Simpler alternative that never takes ownership of UC objects:** keep the idempotent `GRANT` SQL from
 > step 6d in a script and run it once per environment (safe to re-run). Bundle-managed grants pay off
@@ -416,9 +396,12 @@ serving endpoint becomes READY.
 # Delete serving endpoints created by end users first (per endpoint):
 databricks serving-endpoints delete <endpoint-name> --profile <PROFILE>
 
-# Destroy the bundles (removes the app and the job):
-cd app        && databricks bundle destroy -t default --profile <PROFILE> && cd ..
-cd deploy-job && databricks bundle destroy            --profile <PROFILE> && cd ..
+# Destroy the bundles (removes the app and the job). Pass the env target you deployed (-t dev|qa|prod):
+cd app        && databricks bundle destroy -t dev --profile <PROFILE> && cd ..
+cd deploy-job && databricks bundle destroy -t dev --profile <PROFILE> && cd ..
+# If you deployed the optional governance bundle, destroy it too (prevent_destroy guards the
+# schema/volume, so drop those manually below if you really intend to remove the data):
+# cd governance && databricks bundle destroy -t dev --profile <PROFILE> && cd ..
 
 # Optionally drop data (irreversible):
 # DROP TABLE <CATALOG>.<SCHEMA>.model_deployments;
