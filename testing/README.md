@@ -417,13 +417,17 @@ The `gpu_type` is recorded as an endpoint tag; the GPU tier is encoded by the wo
 
 ## What to check in the UI (every case)
 
-- **Deployed Models** row appears immediately as *Deploy in progress* and **auto-expands**.
+- **Deployed Models** row appears **immediately** as *Deploy in progress* with a real "submitted"
+  lifecycle event (the app server writes the initial record to Lakebase on submit — no cold-start
+  gap). The row **auto-expands once** but stays collapsible via the chevron.
 - The **lifecycle timeline** streams live (amber "live" dot), advancing through
-  **wrapper → validator → deployer**, each with a status + timestamp.
+  **wrapper → validator → deployer**, each with a status + timestamp; **Deploy Date** shows the full
+  date + time.
 - On success the **Status** badge turns green **Complete** and the **Serving → Open** link works.
 - On failure (TC5/TC6) the badge turns red **Failed**, the error shows under the badge, and the
   timeline's last event is a red **FAILED** with the message.
-- **Search** box filters by model name / UC name (contains).
+- **Search** box filters by model name / UC name (contains). **Columns are drag-resizable** (drag a
+  header's right edge; widths persist per browser).
 
 ## Cleanup (optional)
 
@@ -433,6 +437,8 @@ for e in house_price_model_endpoint energy_forecaster_endpoint iris_classifier_e
          churn_predictor_endpoint credit_risk_endpoint; do
   databricks serving-endpoints delete "$e" --profile <PROFILE>
 done
-# registered models / rows in <catalog>.<schema>.model_deployments and
-# .model_lifecycle_events can be dropped via SQL if you want a clean slate.
+# registered UC models can be dropped via SQL. The app's status/lifecycle rows now live in
+# Lakebase Postgres — clear them (for a clean slate) with psql, e.g.:
+#   databricks psql --project <LB_PROJECT> --profile <PROFILE> -- -c \
+#     "TRUNCATE model_deployer.model_deployments, model_deployer.model_lifecycle_events;"
 ```

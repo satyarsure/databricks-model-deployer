@@ -3,14 +3,14 @@ resources:
     app_schema:
       catalog_name: ${var.catalog}
       name: ${var.schema}
-      comment: Model Deployer — status/lifecycle tables + artifacts volume
+      comment: Model Deployer — registered models + artifacts volume
       grants:
-        # SELECT at the schema level covers model_deployments, model_lifecycle_events, and any
-        # future table in the schema (DABs has no per-table grant resource).
+        # USE_SCHEMA for the principal that registers/reads models here (a UC group or the deploy
+        # job's identity). The app's status/lifecycle data lives in Lakebase Postgres, not UC, and
+        # its access is granted automatically by the deploy job — so no table SELECT is needed here.
         - principal: ${var.app_grantee}
           privileges:
             - USE_SCHEMA
-            - SELECT
       lifecycle:
         # Never drop the schema (and its data) on `bundle destroy`.
         prevent_destroy: true

@@ -7,8 +7,9 @@ deployment pattern from Genesis Workbench.
 A parameterized workflow job wraps the artifact as an MLflow **pyfunc**, registers it to **Unity
 Catalog**, validates it, and creates/updates a **serving endpoint** (A/B traffic split, CPU/GPU
 sizing, scale-to-zero, inference tables, and a serverless **budget policy** for chargeback).
-Deployment status and full **model lifecycle history** are tracked in Delta tables, with the active
-version marked by a UC `@champion` alias.
+Deployment status and full **model lifecycle history** are tracked in **Lakebase Postgres** (for
+sub-second, real-time reads on the live status board), with the active version marked by a UC
+`@champion` alias.
 
 An A/B variant can be a **new artifact** (wrapped and registered as a new version) or an
 **already-registered version** of the same model referenced as-is — a champion-vs-challenger test
@@ -18,10 +19,12 @@ that serves the current model against a new candidate on the same endpoint.
 
 ```
 React/AppKit app
- ├─ Deployed Models tab  → reads the model_deployments Delta table (search + pagination, status,
- │                          "Open" links, a live lifecycle timeline per row; click a model name to
- │                          deploy a new version, or "A/B test" to pit it against a new candidate)
- └─ Deploy Model tab     → POST /api/deploy → triggers the deploy job
+ ├─ Deployed Models tab  → reads Lakebase Postgres via Express routes (/api/deployments,
+ │                          /api/lifecycle, /api/model-versions) — search + pagination, status,
+ │                          "Open" links, a live lifecycle timeline per row, resizable columns;
+ │                          click a model name to deploy a new version, or "A/B test".
+ └─ Deploy Model tab     → POST /api/deploy → (1) writes an initial "submitted" record to Lakebase
+                            so a real row shows instantly, then (2) triggers the deploy job.
                                                    │
 Deploy job (DABs, serverless) — one notebook, three stages:
    Wrapper    → load artifact(s), wrap as MLflow pyfunc, build signature, register each new-artifact
@@ -29,17 +32,24 @@ Deploy job (DABs, serverless) — one notebook, three stages:
    Validator  → load the registered pyfunc, smoke-test predict, optional mlflow.evaluate vs an eval dataset
    Deployer   → create/update the serving endpoint (traffic split, compute, scale-to-zero, tags,
                 budget policy, inference tables); set the UC @champion alias
-   (every stage writes status to model_deployments and appends to model_lifecycle_events)
+   (every stage writes status to Lakebase model_deployments and appends to model_lifecycle_events)
+
+Lakebase Postgres (schema `model_deployer`) — the app's operational store:
+   model_deployments      → one upserted row per deployment (keyed on deployment_id)
+   model_lifecycle_events → append-only stage/status transitions
+   The deploy job OWNS the schema (self-creates the tables via psycopg) and GRANTs the app's
+   service principal SELECT + INSERT. The app reads them; the app server writes the initial record.
 ```
 
 ## Repository layout
 
 | Path | Description |
 |------|-------------|
-| `app/` | The React/AppKit app (frontend + Express server). Deployed to Databricks Apps. |
-| `deploy-job/` | The DABs bundle for the deploy workflow job (`src/notebooks/deploy_model.py`). |
-| `deploy-job/requirements.txt` | Pinned dependency set for the job's serverless environment. |
-| `governance/` | Optional DABs bundle that declaratively creates the UC schema + `artifacts` volume and grants the app principal read access (alternative to the manual DDL/GRANTs — see [INSTALL.md](INSTALL.md) §6f). |
+| `app/` | The React/AppKit app (frontend + Express server). Reads Lakebase via Express routes (`server/server.ts`) — no `config/queries` / analytics warehouse. |
+| `app/client/src/lib/useApiQuery.ts` | Small client hook that fetches the app's JSON routes (replaces `useAnalyticsQuery`). |
+| `deploy-job/` | The DABs bundle for the deploy workflow job (`src/notebooks/deploy_model.py`). Writes status/lifecycle to Lakebase Postgres. |
+| `deploy-job/requirements.txt` | Pinned dependency set for the job's serverless environment (includes `psycopg`). |
+| `governance/` | Optional DABs bundle that declaratively creates the **UC schema + `artifacts` volume** (where models are registered and artifacts live). The app's data lives in Lakebase, granted automatically by the job — see [INSTALL.md](INSTALL.md) §6f. |
 | `testing/` | Manual-testing fixtures (`setup_test_artifacts.py`) and guide (`README.md`). |
 | `Images/` | UI mockups. |
 
@@ -50,9 +60,8 @@ a run or drift predictions:
 
 - **Deploy job** — the notebook does **no** `%pip install`. Instead the job declares a pinned
   serverless environment (`resources/deploy_model.job.yml` → `environments[].spec`) with
-  `environment_version` (pins the Python runtime) and `-r requirements.txt` (pins every package).
-  Change versions by editing `deploy-job/requirements.txt` and redeploying — never by editing the
-  notebook.
+  `environment_version` (pins the Python runtime) and `-r requirements.txt` (pins every package,
+  including `psycopg` for the Postgres writes).
 - **Served model** — the notebook pins the logged model's `pip_requirements` to the **exact
   versions actually in use at wrap time** (`mlflow=={version}`, `scikit-learn==…`, etc.). Model
   Serving rebuilds the container from these requirements (including on scale-to-zero cold starts),
@@ -63,44 +72,64 @@ fixture pickles load without a version-mismatch warning. Note: a **user-supplied
 compatible with the pinned `scikit-learn` (or its framework) — pin your training environment to
 match, or update `requirements.txt` to the version your artifact was trained with.
 
+## Data store
+
+**Lakebase Postgres** (schema `model_deployer` in a Lakebase project's database) is the app's
+operational store — chosen over a SQL warehouse because the Deployed Models board is a live,
+frequently-updated status view that needs point reads at OLTP latency:
+
+- **`model_deployments`** — one row per deployment (name, UC name, version, status/stage, endpoint,
+  compute, tags, schemas, budget policy, timestamps). Upserted by `deployment_id`.
+- **`model_lifecycle_events`** — append-only audit trail of every stage/status transition.
+
+The **deploy job owns the schema**: on each run it self-creates the schema + tables (`CREATE …
+IF NOT EXISTS`, via `psycopg`) and grants the app's service principal `SELECT, INSERT`. It connects
+using a short-lived OAuth **database credential** for its own identity (`POST
+/api/2.0/postgres/credentials`) — no static secret. The **app server** writes the initial
+"submitted" record on `/api/deploy` (so a real row appears during the job's serverless cold-start),
+then the job upserts the same row as it runs.
+
+**Unity Catalog** (`<catalog>.<schema>`) still holds the **registered models** and the **`artifacts`
+volume** (uploaded/test artifacts). The catalog/schema/volume are provisioned up front; the two app
+tables are **not** in UC anymore — they live in Lakebase.
+
 ## Configuration (no environment-specific values are committed)
 
-Both bundles read a **gitignored `values.local.yml`** (merged via each bundle's `include`) for the
-real workspace path, catalog/schema, app name, and IDs. To set up a deployment, copy the example and
-fill it in:
+All bundles read a **gitignored `values.local.yml`** (merged via each bundle's `include`). Copy the
+examples and fill them in:
 
 ```bash
 cp deploy-job/values.local.example.yml deploy-job/values.local.yml
-cp app/values.local.example.yml       app/values.local.yml
-# then edit both with your workspace root_path, catalog, schema, app name, and IDs
+cp app/values.local.example.yml        app/values.local.yml
+# governance/ is optional (see INSTALL §6f):
+# cp governance/values.local.example.yml governance/values.local.yml
 ```
 
-The app resolves which `catalog.schema.model_deployments` table to read **from the deploy job's
-notebook parameters at runtime** (via `/api/config`), so the app source has nothing environment-specific.
-
-Type generation (build time) resolves the query's columns from the generic sample table named in
-`app/config/queries/deployments.sql` (`main.default.model_deployments` by default). Create an empty
-table with the `model_deployments` schema at that name, or change the sample value to your own —
-the runtime query still binds the real table. (The deploy-job creates the real `model_deployments`
-table on first run.)
+- **deploy-job** — `catalog` / `schema` (UC, for models + artifacts), `budget_policy_id`, cost tags,
+  and the Lakebase coordinates it writes to: `pg_host`, `pg_database`, `pg_endpoint`, `pg_schema`,
+  and `app_sp` (the app's service-principal client id it grants `SELECT, INSERT`).
+- **app** — `app_name`, `job_id` (the deploy job), and `lakebase_branch` / `lakebase_database`
+  (the Lakebase resources it reads from). The app declares a `postgres` resource (not a warehouse);
+  the Apps platform injects `PGHOST`/`PGDATABASE`/`PGUSER`/… and `LAKEBASE_ENDPOINT`.
 
 ## Deploy
 
 > **Installing in a new / client workspace?** See **[INSTALL.md](INSTALL.md)** for the full runbook —
-> prerequisites, required access/permissions, UC provisioning, the deploy order (and its
+> prerequisites, required access/permissions, Lakebase + UC provisioning, the deploy order (and its
 > bootstrapping steps), verification, and troubleshooting. The steps below are the quick reference
-> for a workspace that's already provisioned.
+> for a workspace that's already provisioned. For multiple environments (dev/qa/prod), see the
+> **Environments** section in INSTALL.
 
 Uses your Databricks CLI profile for the workspace host (pass `--profile <PROFILE>`).
 
 ```bash
 # 1) Deploy job (creates/updates the deploy job)
 cd deploy-job
-databricks bundle deploy --target dev --profile <PROFILE>
+databricks bundle deploy -t dev --profile <PROFILE>
 
 # 2) App — Databricks Apps compute runs `npm install` + build at startup
 cd ../app
-databricks bundle deploy -t default --profile <PROFILE>
+databricks bundle deploy -t dev --profile <PROFILE>
 databricks apps deploy <app-name> \
   --source-code-path <workspace-root_path>/app/files \
   --profile <PROFILE>
@@ -118,31 +147,22 @@ databricks apps deploy <app-name> \
 > internal Git records only your origin, never the vendor's. See [INSTALL.md](INSTALL.md) → *Git
 > provenance*.
 
-## Data model (Unity Catalog: `<catalog>.<schema>`)
-
-- **`model_deployments`** — one row per deployment (name, UC name, version, status/stage, endpoint,
-  compute, tags, schemas, budget policy, timestamps). Source of truth for the Deployed Models list.
-- **`model_lifecycle_events`** — append-only audit trail of every stage/status transition.
-- **`artifacts`** volume — holds uploaded/test model artifacts.
-
-The `catalog`/`schema` and the `artifacts` volume must be provisioned up front (UC admin/location);
-the deploy job **self-creates** the two Delta tables on its first run (`CREATE TABLE IF NOT EXISTS`),
-so no manual table DDL is required. See [INSTALL.md](INSTALL.md).
-
 ## Chargeback
 
 - **Serving endpoint** — the form's *Serverless usage policy* (a budget policy ID) becomes the
-  endpoint `budget_policy_id`; the *Description* and *Tags* are applied at creation.
+  endpoint `budget_policy_id` at create time; the *Description* and *Tags* are applied at creation.
+  **Tags are re-synced on every new-version/A/B update** (via the tags API); `budget_policy_id` and
+  `description` are **create-time only** (no serving API updates them post-create).
 - **Deploy job** — carries its own `budget_policy_id` + tags (configurable via `deploy-job` bundle
   variables) so the deployment compute is attributed.
 
 ## Tags / metadata
 
 The form's **Tags** field is a free-form JSON object; each key/value is applied to the serving
-endpoint and persisted in `model_deployments.tags`. Beyond chargeback (`cost_center`, `team`), this
-is the extensible place for **governance/ownership metadata** — e.g. use-case / APMS ID, business /
-technical / support owner, environment, GxP classification, deployment mode — without any schema
-change, so new fields can be added as more workloads onboard.
+endpoint (and re-synced on updates) and persisted in `model_deployments.tags`. Beyond chargeback
+(`cost_center`, `team`), this is the extensible place for **governance/ownership metadata** — e.g.
+use-case / APMS ID, business / technical / support owner, environment, GxP classification,
+deployment mode — without any schema change, so new fields can be added as more workloads onboard.
 
 ## Credits
 

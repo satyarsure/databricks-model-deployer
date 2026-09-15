@@ -5,9 +5,12 @@ include:
   - resources/*.yml
   - "*.local.yml" # gitignored per-environment overrides (values.local.yml)
 
-# OPTIONAL bundle. Declaratively manages the UC schema + `artifacts` volume for the Model Deployer
-# and grants the app's principal read access — an alternative to the manual step-4 DDL and step-6d
-# GRANTs in INSTALL.md. Deploy it only if you want DABs to OWN those UC objects.
+# OPTIONAL bundle. Declaratively manages the UC schema + `artifacts` volume where models are
+# registered and artifacts live — an alternative to the manual step-4b DDL in INSTALL.md. Deploy it
+# only if you want DABs to OWN those UC objects.
+#
+# NOTE: the app's status/lifecycle data lives in Lakebase Postgres, not UC, and the app SP's access
+# to it is granted automatically by the deploy job (_pg_init) — this bundle does NOT grant that.
 #
 # IMPORTANT: a `bundle deploy` here CREATES the schema/volume. In an environment where they already
 # exist and are not bundle-managed, do NOT deploy this bundle (it would conflict) — keep the manual
@@ -26,8 +29,9 @@ variables:
     description: UC schema for model_deployments / model_lifecycle_events + the artifacts volume (required)
   app_grantee:
     description: >-
-      Principal granted read access (required). Prefer a UC GROUP (avoids the app service-principal
-      chicken-and-egg: the app SP id is not a bundle reference), or pass the app SP application-id.
+      Principal granted USE_SCHEMA + READ_VOLUME so it can register models and read artifacts
+      (required). Prefer a UC GROUP, or the deploy job's run identity. (This is NOT the app's data
+      access — that's Lakebase, granted by the deploy job.)
 
 targets:
   dev:
