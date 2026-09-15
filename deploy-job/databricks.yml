@@ -19,6 +19,22 @@ variables:
     default: mlops
   team:
     default: mlops
+  # Lakebase Postgres (the app's read store). The notebook writes status + lifecycle here.
+  pg_host:
+    description: Lakebase endpoint host (status.hosts.host)
+    default: ""
+  pg_database:
+    description: Postgres database name
+    default: databricks_postgres
+  pg_endpoint:
+    description: Lakebase endpoint resource path (projects/<p>/branches/<b>/endpoints/<e>) — used to mint the DB credential
+    default: ""
+  pg_schema:
+    description: Postgres schema the notebook owns for the app tables
+    default: model_deployer
+  app_sp:
+    description: App service-principal client id to grant SELECT on the schema (leave blank until the app is deployed)
+    default: ""
 
 targets:
   # One target per environment. The target NAMES live here (committed); the per-environment

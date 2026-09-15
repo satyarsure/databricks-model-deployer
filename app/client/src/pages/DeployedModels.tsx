@@ -1,10 +1,13 @@
-import { Fragment, useEffect, useMemo, useState } from 'react';
 import {
-  useAnalyticsQuery,
-  Button,
-  Skeleton,
-} from '@databricks/appkit-ui/react';
-import { sql } from '@databricks/appkit-ui/js';
+  Fragment,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+} from 'react';
+import { Button, Skeleton } from '@databricks/appkit-ui/react';
+import { useApiQuery } from '../lib/useApiQuery';
 import {
   Rocket,
   Search,
@@ -97,10 +100,14 @@ function formatDate(v: string | null): string {
   if (!v) return '—';
   const d = new Date(v.replace(' ', 'T'));
   if (Number.isNaN(d.getTime())) return v;
-  return d.toLocaleDateString(undefined, {
+  // Full date + time (the complete deploy timestamp).
+  return d.toLocaleString(undefined, {
+    year: 'numeric',
     month: 'short',
     day: 'numeric',
-    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
   });
 }
 
@@ -124,27 +131,22 @@ function eventDotClass(status: string | null): string {
 
 // Vertical timeline of a deployment's lifecycle events (wrapper -> validator -> deployer).
 function LifecycleTimeline({
-  lifecycleTable,
   deploymentId,
   live,
   nonce,
 }: {
-  lifecycleTable: string;
   deploymentId: string;
   live: boolean;
   nonce: number;
 }) {
-  // Changing nonce (per poll / page load) re-executes the query and busts the cache,
-  // so an in-progress deployment's timeline streams new events instead of showing stale data.
-  const params = useMemo(
-    () => ({
-      lifecycle_table: sql.string(lifecycleTable),
-      deployment_id: sql.string(deploymentId),
-      refresh_nonce: sql.string(String(nonce)),
-    }),
-    [lifecycleTable, deploymentId, nonce],
+  // The nonce (per poll / page load) is folded into the URL so a change triggers a refetch,
+  // streaming new events for an in-progress deployment instead of showing stale data.
+  const url = useMemo(
+    () =>
+      `/api/lifecycle?deployment_id=${encodeURIComponent(deploymentId)}&nonce=${nonce}`,
+    [deploymentId, nonce],
   );
-  const { data, loading, error } = useAnalyticsQuery('lifecycle', params);
+  const { data, loading, error } = useApiQuery<LifecycleEvent>(url);
   // Keep the last successful events so a background refetch (each poll tick) doesn't
   // blank the timeline to a skeleton — only newly-arrived events re-render.
   const [events, setEvents] = useState<LifecycleEvent[]>([]);
@@ -305,8 +307,6 @@ function Pagination({
 
 function DeploymentsTable({
   search,
-  deploymentsTable,
-  lifecycleTable,
   expandedIds,
   onToggleExpand,
   onRows,
@@ -317,8 +317,6 @@ function DeploymentsTable({
   nonce,
 }: {
   search: string;
-  deploymentsTable: string;
-  lifecycleTable: string;
   expandedIds: Set<string>;
   onToggleExpand: (id: string) => void;
   onRows: (rows: DeploymentRow[]) => void;
@@ -328,16 +326,10 @@ function DeploymentsTable({
   onResolvePending: () => void;
   nonce: number;
 }) {
-  // Changing nonce (per poll / page load) re-executes the query and busts the cache,
-  // so a just-submitted or in-progress deployment shows up instead of a stale list.
-  const params = useMemo(
-    () => ({
-      deployments_table: sql.string(deploymentsTable),
-      refresh_nonce: sql.string(String(nonce)),
-    }),
-    [deploymentsTable, nonce],
-  );
-  const { data, loading, error } = useAnalyticsQuery('deployments', params);
+  // The nonce (per poll / page load) is folded into the URL so a change triggers a refetch,
+  // surfacing a just-submitted or in-progress deployment instead of a stale list.
+  const url = useMemo(() => `/api/deployments?nonce=${nonce}`, [nonce]);
+  const { data, loading, error } = useApiQuery<DeploymentRow>(url);
   // Keep the last successful rows so a background refetch (each poll tick) doesn't blank
   // the table to a skeleton — React then re-renders only the cells whose values changed.
   const [rows, setRows] = useState<DeploymentRow[]>([]);
@@ -382,6 +374,62 @@ function DeploymentsTable({
   const safePage = Math.min(page, totalPages);
   const pageRows = filtered.slice((safePage - 1) * pageSize, safePage * pageSize);
 
+  // ---- Resizable columns (drag the right edge of a header, Excel-style) -------------------
+  // Widths persist per browser. No visible separators — the grab zone only cues on hover.
+  const COLS = ['Model Name', 'UC Name', 'Version', 'Deploy Date', 'Status', 'Serving'];
+  const DEFAULT_WIDTHS = [220, 280, 90, 210, 150, 140];
+  const [widths, setWidths] = useState<number[]>(() => {
+    try {
+      const raw = localStorage.getItem('modelDeployer.colWidths');
+      const parsed = raw ? (JSON.parse(raw) as number[]) : null;
+      if (Array.isArray(parsed) && parsed.length === DEFAULT_WIDTHS.length) return parsed;
+    } catch {
+      /* localStorage unavailable — fall back to defaults */
+    }
+    return DEFAULT_WIDTHS;
+  });
+  const resizing = useRef<{ idx: number; startX: number; startW: number } | null>(null);
+  useEffect(() => {
+    const onMove = (e: MouseEvent) => {
+      const r = resizing.current;
+      if (!r) return;
+      const next = Math.max(70, r.startW + (e.clientX - r.startX));
+      setWidths((w) => {
+        const n = [...w];
+        n[r.idx] = next;
+        return n;
+      });
+    };
+    const onUp = () => {
+      if (!resizing.current) return;
+      resizing.current = null;
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      setWidths((w) => {
+        try {
+          localStorage.setItem('modelDeployer.colWidths', JSON.stringify(w));
+        } catch {
+          /* ignore persistence failures */
+        }
+        return w;
+      });
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+  }, []);
+  const startResize = (idx: number) => (e: ReactMouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    resizing.current = { idx, startX: e.clientX, startW: widths[idx] };
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  };
+  const tableWidth = widths.reduce((a, b) => a + b, 0);
+
   if (loading && allRows.length === 0) {
     return (
       <div className="space-y-3 p-4">
@@ -419,30 +467,40 @@ function DeploymentsTable({
   return (
     <>
     <div className="overflow-x-auto">
-      <table className="w-full min-w-[860px] table-fixed text-sm">
+      <table
+        className="table-fixed text-sm"
+        style={{ width: tableWidth, minWidth: '100%' }}
+      >
         <colgroup>
-          <col className="w-[22%]" />
-          <col className="w-[28%]" />
-          <col className="w-[11%]" />
-          <col className="w-[13%]" />
-          <col className="w-[14%]" />
-          <col className="w-[12%]" />
+          {widths.map((w, i) => (
+            <col key={i} style={{ width: w }} />
+          ))}
         </colgroup>
         <thead>
           <tr className="border-b text-left text-xs uppercase tracking-wide text-muted-foreground">
-            <th className="whitespace-nowrap px-4 py-3 font-medium">Model Name</th>
-            <th className="whitespace-nowrap px-4 py-3 font-medium">UC Name</th>
-            <th className="whitespace-nowrap px-4 py-3 font-medium">Version</th>
-            <th className="whitespace-nowrap px-4 py-3 font-medium">Deploy Date</th>
-            <th className="whitespace-nowrap px-4 py-3 font-medium">Status</th>
-            <th className="whitespace-nowrap px-4 py-3 font-medium">Serving</th>
+            {COLS.map((label, i) => (
+              <th key={label} className="relative whitespace-nowrap px-4 py-3 font-medium">
+                {label}
+                {/* Drag handle: a transparent grab zone on the column's right edge; it only
+                    tints on hover, so no permanent vertical separators are added. */}
+                <span
+                  role="separator"
+                  aria-orientation="vertical"
+                  aria-label={`Resize ${label} column`}
+                  onMouseDown={startResize(i)}
+                  className="absolute right-0 top-0 z-10 h-full w-2 cursor-col-resize select-none hover:bg-primary/30"
+                />
+              </th>
+            ))}
           </tr>
         </thead>
         <tbody>
           {pageRows.map((r) => {
             const ui = endpointUiUrl(r);
             const inProgress = IN_PROGRESS.has(r.status ?? '');
-            const open = inProgress || expandedIds.has(r.deployment_id);
+            // In-progress rows are auto-expanded once (see autoOpen in the parent) but stay
+            // fully collapsible — the chevron toggles them like any other row.
+            const open = expandedIds.has(r.deployment_id);
             return (
               <Fragment key={r.deployment_id}>
               <tr className="border-b last:border-0 hover:bg-muted/40">
@@ -482,7 +540,7 @@ function DeploymentsTable({
                 <td className="whitespace-nowrap px-4 py-3 font-mono text-xs">
                   {r.model_version ?? '—'}
                 </td>
-                <td className="whitespace-nowrap px-4 py-3 text-muted-foreground">
+                <td className="px-4 py-3 text-muted-foreground tabular-nums">
                   {formatDate(r.deployed_date)}
                 </td>
                 <td className="px-4 py-3">
@@ -527,7 +585,6 @@ function DeploymentsTable({
                 <tr className="border-b last:border-0 bg-muted/20">
                   <td colSpan={6} className="p-0">
                     <LifecycleTimeline
-                      lifecycleTable={lifecycleTable}
                       deploymentId={r.deployment_id}
                       live={inProgress}
                       nonce={nonce}
@@ -567,14 +624,15 @@ export function DeployedModels({
   onResolvePending: () => void;
 }) {
   const [search, setSearch] = useState('');
-  // A cache-busting nonce for the analytics queries: unique per page load (so a manual
-  // refresh always fetches fresh rows, not a cached list that predates an in-progress
-  // deployment) and bumped on each poll tick while something is deploying.
+  // A refresh nonce for the read routes: unique per page load (so a manual refresh always
+  // fetches fresh rows, not a list that predates an in-progress deployment) and bumped on
+  // each poll tick while something is deploying.
   const [nonce, setNonce] = useState(() => Date.now());
   const [anyInProgress, setAnyInProgress] = useState(false);
-  const [deploymentsTable, setDeploymentsTable] = useState<string | null>(null);
-  const [lifecycleTable, setLifecycleTable] = useState<string | null>(null);
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
+  // Deployments we've auto-expanded once (when they first appear in-progress). Tracking this
+  // separately lets the user then collapse them without us immediately re-opening on the next poll.
+  const autoOpenedRef = useRef<Set<string>>(new Set());
 
   const toggleExpand = (id: string) =>
     setExpandedIds((prev) => {
@@ -584,20 +642,24 @@ export function DeployedModels({
       return next;
     });
 
-  // Resolve which catalog.schema tables to read (from the server, which derives them
-  // from the bound deploy job — nothing hardcoded in the client).
+  // Open a deployment's lifecycle exactly once (auto-expand on first sight); the user can then
+  // collapse it and it won't spring back open on subsequent polls.
+  const autoOpen = (ids: string[]) => {
+    const fresh = ids.filter((id) => !autoOpenedRef.current.has(id));
+    if (fresh.length === 0) return;
+    fresh.forEach((id) => autoOpenedRef.current.add(id));
+    setExpandedIds((prev) => {
+      const next = new Set(prev);
+      fresh.forEach((id) => next.add(id));
+      return next;
+    });
+  };
+
+  // Auto-open a just-submitted deployment (its optimistic row) so its timeline shows immediately.
   useEffect(() => {
-    fetch('/api/config')
-      .then((r) => r.json())
-      .then((d) => {
-        setDeploymentsTable(d.deploymentsTable);
-        setLifecycleTable(d.lifecycleTable);
-      })
-      .catch(() => {
-        setDeploymentsTable('main.default.model_deployments');
-        setLifecycleTable('main.default.model_lifecycle_events');
-      });
-  }, []);
+    if (pending) autoOpen([pending.deployment_id]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pending]);
 
   // Poll for status changes while any deployment is still running — or while a
   // just-submitted deployment is still waiting for the job to write its first row.
@@ -626,30 +688,24 @@ export function DeployedModels({
         </Button>
       </div>
 
-      {deploymentsTable === null || lifecycleTable === null ? (
-        <div className="space-y-3 p-4">
-          {[0, 1, 2, 3].map((i) => (
-            <Skeleton key={i} className="h-10 w-full" />
-          ))}
-        </div>
-      ) : (
-        <DeploymentsTable
-          key={deploymentsTable}
-          search={search}
-          deploymentsTable={deploymentsTable}
-          lifecycleTable={lifecycleTable}
-          nonce={nonce}
-          expandedIds={expandedIds}
-          onToggleExpand={toggleExpand}
-          onDeployVersion={onDeployVersion}
-          onAbTest={onAbTest}
-          pending={pending}
-          onResolvePending={onResolvePending}
-          onRows={(rows) =>
-            setAnyInProgress(rows.some((r) => IN_PROGRESS.has(r.status ?? '')))
-          }
-        />
-      )}
+      <DeploymentsTable
+        search={search}
+        nonce={nonce}
+        expandedIds={expandedIds}
+        onToggleExpand={toggleExpand}
+        onDeployVersion={onDeployVersion}
+        onAbTest={onAbTest}
+        pending={pending}
+        onResolvePending={onResolvePending}
+        onRows={(rows) => {
+          setAnyInProgress(rows.some((r) => IN_PROGRESS.has(r.status ?? '')));
+          autoOpen(
+            rows
+              .filter((r) => IN_PROGRESS.has(r.status ?? ''))
+              .map((r) => r.deployment_id),
+          );
+        }}
+      />
     </div>
   );
 }

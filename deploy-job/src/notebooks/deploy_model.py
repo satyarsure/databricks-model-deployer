@@ -46,10 +46,18 @@ dbutils.widgets.text("deploy_spec", "{}")
 dbutils.widgets.text("deployment_id", "-1")
 dbutils.widgets.text("catalog", "main")
 dbutils.widgets.text("schema", "default")
+# Lakebase Postgres coordinates for the app-facing store (status + lifecycle tables).
+# Supplied by the bundle (var.pg_*) so nothing deployment-specific is hardcoded here.
+dbutils.widgets.text("pg_host", "")            # endpoint host
+dbutils.widgets.text("pg_database", "databricks_postgres")
+dbutils.widgets.text("pg_endpoint", "")        # endpoint resource path (for the DB credential)
+dbutils.widgets.text("pg_schema", "model_deployer")
+dbutils.widgets.text("app_sp", "")             # app service-principal client id to grant SELECT
 
 CATALOG = dbutils.widgets.get("catalog")
 SCHEMA = dbutils.widgets.get("schema")
-TABLE = f"{CATALOG}.{SCHEMA}.model_deployments"
+# Catalog/schema are the UC location where MODELS are registered (unchanged). The app's status +
+# lifecycle rows now live in Lakebase Postgres, not Delta.
 spec = json.loads(dbutils.widgets.get("deploy_spec"))
 deployment_id = int(dbutils.widgets.get("deployment_id"))
 try:
@@ -75,79 +83,128 @@ for _p in ["scikit-learn", "pandas", "numpy", "scipy", "cloudpickle", "joblib", 
 print("[env] served model pip_requirements:", SERVED_PIP_REQUIREMENTS)
 
 # COMMAND ----------
-def sql_escape(v):
-    return "" if v is None else str(v).replace("'", "''")
+# ---- Lakebase Postgres: the app-facing store for deployment status + lifecycle -------------
+# The React app reads these two tables from Lakebase (sub-second, real-time) rather than a SQL
+# warehouse. This notebook is the WRITER: it owns the schema, creates the tables (below),
+# upserts the status row, appends lifecycle events, and grants the app's SP SELECT. Auth is an
+# OAuth DB credential for the notebook's own identity (POST /api/2.0/postgres/credentials) — no
+# static secret. psycopg is pinned in requirements.txt.
+import psycopg
+
+PG_HOST = dbutils.widgets.get("pg_host")
+PG_DATABASE = dbutils.widgets.get("pg_database")
+PG_ENDPOINT = dbutils.widgets.get("pg_endpoint")
+PG_SCHEMA = dbutils.widgets.get("pg_schema")
+APP_SP = dbutils.widgets.get("app_sp")
+
+_wsc = WorkspaceClient()
+_PG_USER = spark.sql("SELECT current_user()").collect()[0][0]  # PG role = caller's identity
+_PG = {"conn": None}
+
+def _pg_token():
+    # Short-lived (~1h) OAuth credential for the caller's identity; used as the PG password.
+    return _wsc.api_client.do(
+        "POST", "/api/2.0/postgres/credentials", body={"endpoint": PG_ENDPOINT}
+    )["token"]
+
+def _pg_conn():
+    c = _PG["conn"]
+    if c is None or c.closed:
+        _PG["conn"] = psycopg.connect(
+            host=PG_HOST, dbname=PG_DATABASE, user=_PG_USER,
+            password=_pg_token(), sslmode="require", autocommit=True,
+        )
+    return _PG["conn"]
+
+def _pg_exec(sql, params=None, fetch=False):
+    # One transparent reconnect (covers scale-to-zero wake, dropped idle conns, token refresh).
+    last = None
+    for _ in range(2):
+        try:
+            with _pg_conn().cursor() as cur:
+                cur.execute(sql, params or ())
+                return cur.fetchall() if fetch else None
+        except Exception as e:
+            last = e
+            _PG["conn"] = None
+    raise last
 
 def merge_status(**cols):
-    """Upsert the deployment row keyed on deployment_id."""
-    set_pairs, insert_cols, insert_vals = ["target.updated_at = CURRENT_TIMESTAMP()"], ["deployment_id"], [str(deployment_id)]
-    for k, v in cols.items():
-        if isinstance(v, bool):
-            lit = "true" if v else "false"
-        elif v is None:
-            lit = "NULL"
-        else:
-            lit = f"'{sql_escape(v)}'"
-        set_pairs.append(f"target.{k} = {lit}")
-        insert_cols.append(k)
-        insert_vals.append(lit)
-    insert_cols.append("updated_at"); insert_vals.append("CURRENT_TIMESTAMP()")
-    spark.sql(f"""
-        MERGE INTO {TABLE} AS target
-        USING (SELECT {deployment_id} AS deployment_id) AS source
-        ON target.deployment_id = source.deployment_id
-        WHEN MATCHED THEN UPDATE SET {", ".join(set_pairs)}
-        WHEN NOT MATCHED THEN INSERT ({", ".join(insert_cols)}) VALUES ({", ".join(insert_vals)})
-    """)
+    """Upsert the deployment row keyed on deployment_id (Postgres INSERT ... ON CONFLICT)."""
+    keys = list(cols.keys())
+    insert_cols = ["deployment_id"] + keys + ["deployed_date", "updated_at"]
+    placeholders = ["%s"] + ["%s"] * len(keys) + ["now()", "now()"]
+    values = [deployment_id] + [cols[k] for k in keys]
+    # deployed_date is set once (first insert) and preserved on update; updated_at always bumps.
+    update_set = ", ".join([f"{k} = EXCLUDED.{k}" for k in keys] + ["updated_at = now()"])
+    _pg_exec(
+        f'INSERT INTO {PG_SCHEMA}.model_deployments ({", ".join(insert_cols)}) '
+        f'VALUES ({", ".join(placeholders)}) '
+        f'ON CONFLICT (deployment_id) DO UPDATE SET {update_set}',
+        values,
+    )
 
 def sanitize_endpoint(name):
     n = re.sub(r"[^A-Za-z0-9_-]", "_", name)
     return n[:60].strip("_") or "endpoint"
 
-LIFECYCLE_TABLE = f"{CATALOG}.{SCHEMA}.model_lifecycle_events"
-
 def log_event(stage, status, message="", version=""):
     """Append an immutable lifecycle event (full transition history / audit trail)."""
     import time as _t
     try:
-        spark.sql(f"""
-            INSERT INTO {LIFECYCLE_TABLE}
-              (event_id, deployment_id, model_name, uc_full_name, model_version,
-               stage, status, message, actor, event_time)
-            VALUES ({_t.time_ns()}, {deployment_id},
-               '{sql_escape(spec.get("name"))}', '{sql_escape(globals().get("uc_full", ""))}',
-               '{sql_escape(version)}', '{sql_escape(stage)}', '{sql_escape(status)}',
-               '{sql_escape(message)[:1000]}', '{sql_escape(spec.get("deployed_by"))}',
-               CURRENT_TIMESTAMP())
-        """)
+        _pg_exec(
+            f'INSERT INTO {PG_SCHEMA}.model_lifecycle_events '
+            f'(event_id, deployment_id, model_name, uc_full_name, model_version, '
+            f' stage, status, message, actor, event_time) '
+            f'VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s, now())',
+            [_t.time_ns(), deployment_id, spec.get("name"), globals().get("uc_full", ""),
+             version, stage, status, str(message)[:1000], spec.get("deployed_by")],
+        )
     except Exception as le:
         print(f"[lifecycle] could not log event: {le}")
 
 # COMMAND ----------
-# ---- Ensure the status + lifecycle tables exist (idempotent, self-provisioning) ---------
-# So a fresh workspace needs no manual table DDL — only the catalog/schema/volume (which
-# require UC admin/location) are pre-provisioned. CREATE TABLE IF NOT EXISTS is a no-op once
-# the tables exist. Keep these column lists in sync with merge_status()/log_event() and the
-# app's config/queries/*.sql.
-spark.sql(f"""
-    CREATE TABLE IF NOT EXISTS {TABLE} (
-      deployment_id BIGINT, model_name STRING, description STRING,
-      uc_catalog STRING, uc_schema STRING, uc_model STRING, uc_full_name STRING,
-      model_version STRING, experiment_name STRING, eval_dataset STRING,
-      serverless_usage_policy STRING, tags STRING,
-      compute_type STRING, gpu_type STRING, compute_size STRING, scale_to_zero BOOLEAN,
-      artifacts_json STRING, input_schema_json STRING, output_schema_json STRING,
-      endpoint_name STRING, invoke_url STRING, status STRING, stage STRING, error_message STRING,
-      deployed_by STRING, deployed_date TIMESTAMP, updated_at TIMESTAMP, run_id STRING
-    ) USING DELTA
-""")
-spark.sql(f"""
-    CREATE TABLE IF NOT EXISTS {LIFECYCLE_TABLE} (
-      event_id BIGINT, deployment_id BIGINT, model_name STRING, uc_full_name STRING,
-      model_version STRING, stage STRING, status STRING, message STRING,
-      actor STRING, event_time TIMESTAMP
-    ) USING DELTA
-""")
+# ---- Ensure the Postgres schema + tables exist (idempotent, self-provisioning) ------------
+# The notebook owns the schema, so a fresh deployment target needs no manual Postgres DDL. Also
+# (best-effort) grants the app's service principal read access — the SP role exists once the app
+# has been deployed with its `postgres` resource, so a re-run after that makes the grant stick.
+# Keep these column lists in sync with merge_status()/log_event() and the app's read routes.
+def _pg_init():
+    _pg_exec(f'CREATE SCHEMA IF NOT EXISTS {PG_SCHEMA}')
+    _pg_exec(f"""
+        CREATE TABLE IF NOT EXISTS {PG_SCHEMA}.model_deployments (
+          deployment_id BIGINT PRIMARY KEY, model_name TEXT, description TEXT,
+          uc_catalog TEXT, uc_schema TEXT, uc_model TEXT, uc_full_name TEXT,
+          model_version TEXT, experiment_name TEXT, eval_dataset TEXT,
+          serverless_usage_policy TEXT, tags TEXT,
+          compute_type TEXT, gpu_type TEXT, compute_size TEXT, scale_to_zero BOOLEAN,
+          artifacts_json TEXT, input_schema_json TEXT, output_schema_json TEXT,
+          endpoint_name TEXT, invoke_url TEXT, status TEXT, stage TEXT, error_message TEXT,
+          deployed_by TEXT, deployed_date TIMESTAMPTZ, updated_at TIMESTAMPTZ, run_id TEXT
+        )
+    """)
+    _pg_exec(f"""
+        CREATE TABLE IF NOT EXISTS {PG_SCHEMA}.model_lifecycle_events (
+          event_id BIGINT PRIMARY KEY, deployment_id BIGINT, model_name TEXT, uc_full_name TEXT,
+          model_version TEXT, stage TEXT, status TEXT, message TEXT, actor TEXT, event_time TIMESTAMPTZ
+        )
+    """)
+    _pg_exec(f'CREATE INDEX IF NOT EXISTS ix_lifecycle_deployment '
+             f'ON {PG_SCHEMA}.model_lifecycle_events (deployment_id, event_time)')
+    if APP_SP:
+        # SELECT so the app reads the tables; INSERT so the app server can write the initial
+        # "submitted" record + lifecycle event at deploy-submit time (before this job cold-starts).
+        for stmt in (
+            f'GRANT USAGE ON SCHEMA {PG_SCHEMA} TO "{APP_SP}"',
+            f'GRANT SELECT, INSERT ON ALL TABLES IN SCHEMA {PG_SCHEMA} TO "{APP_SP}"',
+            f'ALTER DEFAULT PRIVILEGES IN SCHEMA {PG_SCHEMA} GRANT SELECT, INSERT ON TABLES TO "{APP_SP}"',
+        ):
+            try:
+                _pg_exec(stmt)
+            except Exception as ge:
+                print(f"[pg] grant skipped (app SP role may not exist yet): {ge}")
+
+_pg_init()
 
 # COMMAND ----------
 # ---- Record the initial IN_PROGRESS row -------------------------------------
@@ -173,13 +230,13 @@ merge_status(
     endpoint_name=endpoint_name, status="IN_PROGRESS", stage="wrapper",
     deployed_by=spec.get("deployed_by"), run_id=run_id,
 )
-spark.sql(f"UPDATE {TABLE} SET deployed_date = CURRENT_TIMESTAMP() WHERE deployment_id = {deployment_id} AND deployed_date IS NULL")
+# (deployed_date is set on the first upsert above and preserved on later updates.)
 # A serverless task can auto-retry on failure; each attempt re-runs this notebook from the
 # top. Clear any lifecycle events from a prior attempt of THIS deployment so the timeline
 # shows a single clean run (wrapper -> validator -> deployer) instead of duplicated events.
-# (model_deployments is a MERGE/upsert keyed by deployment_id, so it needs no such reset.)
+# (model_deployments is an upsert keyed by deployment_id, so it needs no such reset.)
 try:
-    spark.sql(f"DELETE FROM {LIFECYCLE_TABLE} WHERE deployment_id = {deployment_id}")
+    _pg_exec(f'DELETE FROM {PG_SCHEMA}.model_lifecycle_events WHERE deployment_id = %s', [deployment_id])
 except Exception as de:
     print(f"[lifecycle] could not reset prior events: {de}")
 log_event("wrapper", "IN_PROGRESS", "deployment submitted")
@@ -387,7 +444,8 @@ try:
         tags.append(EndpointTag(key="gpu_type", value=str(compute.get("gpu_type"))))
     for k, val in (spec.get("tags", {}) or {}).items():
         tags.append(EndpointTag(key=str(k), value=str(val)))
-    # Real serverless usage policy (budget_policy_id) + description are create-time only.
+    # Endpoint tags ARE synced on update (via the tags API, below). budget_policy_id + description
+    # remain create-time only — the serving config-update API can't change them post-create.
     budget_policy_id = (spec.get("serverless_usage_policy") or "").strip() or None
     description = spec.get("description") or None
 
@@ -396,10 +454,24 @@ try:
                                      traffic_config=TrafficConfig(routes=routes))
     try:
         w.serving_endpoints.get(endpoint_name)
-        print(f"[deployer] updating {endpoint_name} (note: budget policy/description are set only at first create)")
+        print(f"[deployer] updating {endpoint_name} (budget policy/description stay as first created)")
         w.serving_endpoints.update_config_and_wait(
             name=endpoint_name, served_entities=served_entities,
             traffic_config=TrafficConfig(routes=routes), timeout=timedelta(minutes=60))
+        # A config update does NOT refresh endpoint tags, so sync them explicitly via the tags
+        # API: upsert the desired keys (so changed values like env/team take effect) and drop
+        # any tags that are no longer provided. Non-fatal if the SDK/endpoint can't patch tags.
+        try:
+            existing = w.serving_endpoints.get(endpoint_name)
+            desired_keys = {t.key for t in tags}
+            delete_keys = [t.key for t in (existing.tags or []) if t.key not in desired_keys]
+            patch_kw = {"name": endpoint_name, "add_tags": tags}
+            if delete_keys:
+                patch_kw["delete_tags"] = delete_keys
+            w.serving_endpoints.patch(**patch_kw)
+            print(f"[deployer] synced endpoint tags ({len(tags)} set, {len(delete_keys)} removed)")
+        except Exception as te:
+            print(f"[deployer] tag sync warning (non-fatal): {te}")
     except errors.platform.ResourceDoesNotExist:
         print(f"[deployer] creating {endpoint_name} (budget_policy_id={budget_policy_id})")
         kw = dict(name=endpoint_name, config=config, tags=tags, timeout=timedelta(minutes=60))

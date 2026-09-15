@@ -4,6 +4,11 @@
 # One block per environment target (dev / qa / prod) — keep only the ones you use, and deploy
 # each with `-t <env> --profile <env>`. The workspace HOST comes from the CLI --profile, not here.
 # For a single environment, keep just the `dev` block.
+#
+# pg_* point the notebook at the Lakebase project it writes the app's status/lifecycle tables to
+# (get them from `databricks postgres list-endpoints/list-databases`). app_sp is the app's
+# service-principal client id (from `databricks apps get <APP_NAME> -o json`) — the notebook
+# grants it SELECT; leave blank until the app is deployed, then fill it and redeploy the job.
 targets:
   dev:
     workspace:
@@ -14,6 +19,11 @@ targets:
       budget_policy_id: <dev-serverless-budget-policy-id>
       cost_center: <your_cost_center>
       team: <your_team>
+      pg_host: <dev-endpoint>.database.<region>.azuredatabricks.net
+      pg_database: databricks_postgres
+      pg_endpoint: projects/<dev-project>/branches/production/endpoints/primary
+      pg_schema: model_deployer
+      app_sp: <dev-app-sp-client-id>
   qa:
     workspace:
       root_path: /Workspace/Shared/model-deployer-qa/deploy-job
@@ -23,6 +33,11 @@ targets:
       budget_policy_id: <qa-serverless-budget-policy-id>
       cost_center: <your_cost_center>
       team: <your_team>
+      pg_host: <qa-endpoint>.database.<region>.azuredatabricks.net
+      pg_database: databricks_postgres
+      pg_endpoint: projects/<qa-project>/branches/production/endpoints/primary
+      pg_schema: model_deployer
+      app_sp: <qa-app-sp-client-id>
   prod:
     workspace:
       root_path: /Workspace/Shared/model-deployer-prod/deploy-job
@@ -32,3 +47,8 @@ targets:
       budget_policy_id: <prod-serverless-budget-policy-id>
       cost_center: <your_cost_center>
       team: <your_team>
+      pg_host: <prod-endpoint>.database.<region>.azuredatabricks.net
+      pg_database: databricks_postgres
+      pg_endpoint: projects/<prod-project>/branches/production/endpoints/primary
+      pg_schema: model_deployer
+      app_sp: <prod-app-sp-client-id>

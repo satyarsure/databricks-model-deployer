@@ -23,6 +23,12 @@ resources:
               deployment_id: "-1"
               catalog: ${var.catalog}
               schema: ${var.schema}
+              # Lakebase Postgres coordinates for the app-facing status/lifecycle store.
+              pg_host: ${var.pg_host}
+              pg_database: ${var.pg_database}
+              pg_endpoint: ${var.pg_endpoint}
+              pg_schema: ${var.pg_schema}
+              app_sp: ${var.app_sp}
 
       # Reproducible dependency set for serverless compute. environment_version pins the
       # Python runtime; dependencies install the exact versions from the bundled

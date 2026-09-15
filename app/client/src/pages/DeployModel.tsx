@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
-import { Button, Label, useAnalyticsQuery } from '@databricks/appkit-ui/react';
-import { sql } from '@databricks/appkit-ui/js';
+import { useMemo, useState, type ReactNode } from 'react';
+import { Button, Label } from '@databricks/appkit-ui/react';
 import { Plus, Trash2, Save, Info } from 'lucide-react';
+import { useApiQuery } from '../lib/useApiQuery';
 import type { DeploymentRow, PendingDeployment } from '../types';
 
 // ---- shared types -----------------------------------------------------------
@@ -228,28 +228,21 @@ function Toggle({
 // Dropdown of registered versions for a UC model (variant A of an A/B test). Sourced from
 // the model_versions analytics query (versions this app has deployed for that model).
 function VersionPicker({
-  deploymentsTable,
   ucFull,
   value,
   onChange,
 }: {
-  deploymentsTable: string | null;
   ucFull: string;
   value: string;
   onChange: (v: string) => void;
 }) {
-  const params = useMemo(
-    () => ({
-      deployments_table: sql.string(deploymentsTable ?? 'main.default.model_deployments'),
-      uc_full: sql.string(ucFull),
-      refresh_nonce: sql.string('0'),
-    }),
-    [deploymentsTable, ucFull],
+  // Versions this app has deployed for the given UC model (from the Lakebase read route).
+  const url = useMemo(
+    () => (ucFull ? `/api/model-versions?uc_full=${encodeURIComponent(ucFull)}` : null),
+    [ucFull],
   );
-  const { data, loading } = useAnalyticsQuery('model_versions', params);
-  const versions = ((data ?? []) as Array<{ version: number | string }>)
-    .map((r) => String(r.version))
-    .filter(Boolean);
+  const { data, loading } = useApiQuery<{ version: number | string }>(url);
+  const versions = (data ?? []).map((r) => String(r.version)).filter(Boolean);
   // Keep the pre-filled current version selectable even if the query hasn't loaded it.
   const options = value && !versions.includes(value) ? [value, ...versions] : versions;
   return (
@@ -257,7 +250,7 @@ function VersionPicker({
       className={inputCls}
       value={value}
       onChange={(e) => onChange(e.target.value)}
-      disabled={deploymentsTable === null}
+      disabled={!ucFull}
     >
       {options.length === 0 && (
         <option value="">{loading ? 'Loading versions…' : 'No versions found'}</option>
@@ -290,19 +283,10 @@ export function DeployModel({
   const lockedCls = isNewVersion ? ' opacity-60 cursor-not-allowed' : '';
 
   // When the UC model is already known (deploying a new version OR an A/B test), a variant
-  // can reference an existing registered version instead of a new artifact.
+  // can reference an existing registered version instead of a new artifact. The version
+  // picker reads the versions from the app's Lakebase route (server resolves the schema).
   const ucFull = (abBaseline ?? prefill)?.uc_full_name ?? '';
   const canUseExisting = isNewVersion && !!ucFull;
-
-  // The version picker needs the real deployments table (resolved server-side).
-  const [deploymentsTable, setDeploymentsTable] = useState<string | null>(null);
-  useEffect(() => {
-    if (!canUseExisting) return;
-    fetch('/api/config')
-      .then((r) => r.json())
-      .then((d) => setDeploymentsTable(d.deploymentsTable ?? null))
-      .catch(() => setDeploymentsTable(null));
-  }, [canUseExisting]);
 
   const [name, setName] = useState(pf?.name ?? '');
   const [description, setDescription] = useState(pf?.description ?? '');
@@ -555,7 +539,6 @@ export function DeployModel({
                     <div>
                       <Label className="mb-1 block text-xs text-muted-foreground">Version</Label>
                       <VersionPicker
-                        deploymentsTable={deploymentsTable}
                         ucFull={ucFull}
                         value={a.version}
                         onChange={(v) => setArtifact(i, { version: v })}

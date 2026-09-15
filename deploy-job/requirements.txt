@@ -9,6 +9,9 @@
 # client does not include — with skinny it raised and was silently skipped.
 mlflow[databricks]==2.16.2
 databricks-sdk==0.68.0
+# Postgres driver — the notebook writes deployment status + lifecycle to Lakebase (the app's
+# read store). Uses databricks-sdk's api_client for the OAuth DB credential (no SDK bump needed).
+psycopg[binary]==3.2.3
 scikit-learn==1.4.2
 pandas==2.2.2
 numpy==1.26.4

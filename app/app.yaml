@@ -1,6 +1,8 @@
 command: ['npm', 'run', 'start']
 env:
-  - name: DATABRICKS_WAREHOUSE_ID
-    valueFrom: sql-warehouse
   - name: DATABRICKS_JOB_ID
     valueFrom: job
+  # Lakebase: only LAKEBASE_ENDPOINT must be set explicitly; PGHOST/PGPORT/PGDATABASE/PGUSER/
+  # PGSSLMODE are auto-injected by the platform from the `postgres` app resource.
+  - name: LAKEBASE_ENDPOINT
+    valueFrom: postgres

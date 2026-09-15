@@ -8,8 +8,10 @@ variables:
   app_name:
     description: Databricks App name (must match the pre-created app)
     default: model-deployer-app
-  sql_warehouse_id:
-    description: SQL Warehouse ID
+  lakebase_branch:
+    description: Lakebase branch resource path (projects/<p>/branches/<b>)
+  lakebase_database:
+    description: Lakebase database resource path (projects/<p>/branches/<b>/databases/<d>)
   job_id:
     description: Numeric Databricks job ID for the deploy job.
 
@@ -26,10 +28,13 @@ resources:
 
       # The resources which this app has access to.
       resources:
-        - name: sql-warehouse
-          sql_warehouse:
-            id: ${var.sql_warehouse_id}
-            permission: CAN_USE
+        # Lakebase Postgres: the app reads the model_deployer schema (job-owned; the job grants
+        # this SP SELECT). CAN_CONNECT_AND_CREATE provisions the SP as a Postgres role.
+        - name: postgres
+          postgres:
+            branch: ${var.lakebase_branch}
+            database: ${var.lakebase_database}
+            permission: CAN_CONNECT_AND_CREATE
         - name: job
           job:
             id: ${var.job_id}

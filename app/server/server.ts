@@ -1,5 +1,9 @@
-import { createApp, analytics, jobs, server } from '@databricks/appkit';
+import { createApp, jobs, server, lakebase } from '@databricks/appkit';
 import { z } from 'zod';
+
+// The deploy job owns this Postgres schema and writes the two app tables into it; the app
+// reads them from Lakebase (sub-second, real-time). Overridable per environment.
+const PG_SCHEMA = process.env.PG_APP_SCHEMA || 'model_deployer';
 
 // ---- Deploy spec validation -------------------------------------------------
 const fieldSchema = z.object({
@@ -69,13 +73,7 @@ const deploySpecSchema = z.object({
 });
 
 createApp({
-  // This is a live deployment-status board: the deployments list and lifecycle timeline
-  // must always reflect current state. AppKit's analytics query cache is on by default and
-  // can serve a stale list (e.g. hiding an in-progress deployment after a page reload), so
-  // disable it — the queries are small and run on the warehouse each time.
-  cache: { enabled: false },
   plugins: [
-    analytics(),
     jobs({
       jobs: {
         // Single notebook deploy job; the plugin forwards these as notebook_params.
@@ -89,6 +87,7 @@ createApp({
       },
     }),
     server(),
+    lakebase(),
   ],
   async onPluginsReady(appkit) {
     appkit.server.extend((app) => {
@@ -127,6 +126,77 @@ createApp({
           deploymentsTable: `${catalog}.${schema}.model_deployments`,
           lifecycleTable: `${catalog}.${schema}.model_lifecycle_events`,
         });
+      });
+
+      // ---- Lakebase reads (the app's data store) --------------------------------------
+      // The deploy job owns the `model_deployer` schema and writes these tables; the app
+      // reads them (sub-second, real-time). Reads tolerate "not created / not granted yet"
+      // (before the first job run or the SP grant) by returning an empty list, so the board
+      // shows an empty state instead of an error.
+      const DEPLOYMENTS = `${PG_SCHEMA}.model_deployments`;
+      const LIFECYCLE = `${PG_SCHEMA}.model_lifecycle_events`;
+      // undefined_table / invalid_schema_name / insufficient_privilege -> treat as "empty".
+      const PG_EMPTY_CODES = new Set(['42P01', '3F000', '42501']);
+      const pgErr = (e: unknown) => (e as { code?: string; message?: string }) ?? {};
+      const isEmpty = (e: unknown) => PG_EMPTY_CODES.has(pgErr(e).code ?? '');
+
+      app.get('/api/deployments', async (_req, res) => {
+        try {
+          const { rows } = await appkit.lakebase.query(
+            `SELECT deployment_id::text, model_name, description, uc_full_name, uc_catalog,
+                    uc_schema, uc_model, model_version, status, stage, error_message,
+                    endpoint_name, invoke_url, experiment_name, eval_dataset,
+                    serverless_usage_policy, tags, artifacts_json, input_schema_json,
+                    output_schema_json, compute_type, gpu_type, compute_size,
+                    scale_to_zero::text, deployed_by, deployed_date, updated_at
+             FROM ${DEPLOYMENTS}
+             ORDER BY deployed_date DESC NULLS LAST, updated_at DESC NULLS LAST
+             LIMIT 200`,
+          );
+          res.json(rows);
+        } catch (e) {
+          if (isEmpty(e)) { res.json([]); return; }
+          console.error('[lakebase] /api/deployments failed:', e);
+          res.status(500).json({ error: String(pgErr(e).message ?? e) });
+        }
+      });
+
+      app.get('/api/lifecycle', async (req, res) => {
+        const deploymentId = String(req.query.deployment_id ?? '');
+        if (!/^\d+$/.test(deploymentId)) { res.json([]); return; }
+        try {
+          const { rows } = await appkit.lakebase.query(
+            `SELECT stage, status, message, event_time
+             FROM ${LIFECYCLE} WHERE deployment_id = $1::bigint ORDER BY event_time`,
+            [deploymentId],
+          );
+          res.json(rows);
+        } catch (e) {
+          if (isEmpty(e)) { res.json([]); return; }
+          console.error('[lakebase] /api/lifecycle failed:', e);
+          res.status(500).json({ error: String(pgErr(e).message ?? e) });
+        }
+      });
+
+      app.get('/api/model-versions', async (req, res) => {
+        const ucFull = String(req.query.uc_full ?? '');
+        if (!ucFull) { res.json([]); return; }
+        try {
+          const { rows } = await appkit.lakebase.query(
+            `SELECT DISTINCT (substring(trim(v) FROM '([0-9]+)$'))::int AS version
+             FROM ${DEPLOYMENTS} d,
+                  LATERAL regexp_split_to_table(COALESCE(d.model_version, ''), ',') AS v
+             WHERE d.uc_full_name = $1 AND d.status = 'COMPLETE'
+               AND substring(trim(v) FROM '([0-9]+)$') IS NOT NULL
+             ORDER BY version DESC`,
+            [ucFull],
+          );
+          res.json(rows);
+        } catch (e) {
+          if (isEmpty(e)) { res.json([]); return; }
+          console.error('[lakebase] /api/model-versions failed:', e);
+          res.status(500).json({ error: String(pgErr(e).message ?? e) });
+        }
       });
 
       // Signed-in user (for header display).
@@ -183,6 +253,47 @@ createApp({
             .json({ error: `Failed to trigger deploy job: ${result.message}` });
           return;
         }
+
+        // Write a real record immediately (as the app SP) so the list shows a persisted row and
+        // a first lifecycle event during the deploy job's serverless cold-start (~30s) — no
+        // client-only placeholder / "waiting" gap. The job then upserts this same row (keyed on
+        // deployment_id) as it runs; its retry-reset later replaces this 'submitted' event with
+        // the wrapper→validator→deployer events. Best-effort: if it fails, the job still creates
+        // the row after cold-start (the optimistic row bridges the gap in that case).
+        try {
+          const uc = spec.uc;
+          const ucFull = `${uc.catalog}.${uc.schema}.${uc.model}`;
+          await appkit.lakebase.query(
+            `INSERT INTO ${PG_SCHEMA}.model_deployments
+               (deployment_id, model_name, description, uc_catalog, uc_schema, uc_model,
+                uc_full_name, experiment_name, eval_dataset, serverless_usage_policy, tags,
+                compute_type, gpu_type, compute_size, scale_to_zero, artifacts_json,
+                input_schema_json, output_schema_json, status, stage, deployed_by,
+                deployed_date, updated_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,
+                     'IN_PROGRESS','submitted',$19, now(), now())
+             ON CONFLICT (deployment_id) DO NOTHING`,
+            [
+              deploymentId, spec.name, spec.description, uc.catalog, uc.schema, uc.model,
+              ucFull, spec.experiment_name, spec.eval_dataset, spec.serverless_usage_policy,
+              JSON.stringify(spec.tags ?? {}), spec.compute.compute_type,
+              spec.compute.gpu_type ?? null, spec.compute.size, spec.compute.scale_to_zero,
+              JSON.stringify(spec.artifacts ?? []), JSON.stringify(spec.input_schema ?? []),
+              JSON.stringify(spec.output_schema ?? []), email,
+            ],
+          );
+          await appkit.lakebase.query(
+            `INSERT INTO ${PG_SCHEMA}.model_lifecycle_events
+               (event_id, deployment_id, model_name, uc_full_name, model_version, stage, status,
+                message, actor, event_time)
+             VALUES ($1,$2,$3,$4,'','submitted','IN_PROGRESS','deployment request submitted',$5, now())
+             ON CONFLICT (event_id) DO NOTHING`,
+            [Date.now(), deploymentId, spec.name, ucFull, email],
+          );
+        } catch (e) {
+          console.error('[lakebase] initial record write failed (job will create it):', e);
+        }
+
         res.status(202).json({
           ok: true,
           deployment_id: String(deploymentId),
