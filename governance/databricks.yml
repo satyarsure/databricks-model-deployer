@@ -1,0 +1,36 @@
+bundle:
+  name: model-deployer-governance
+
+include:
+  - resources/*.yml
+  - "*.local.yml" # gitignored per-environment overrides (values.local.yml)
+
+# OPTIONAL bundle. Declaratively manages the UC schema + `artifacts` volume for the Model Deployer
+# and grants the app's principal read access — an alternative to the manual step-4 DDL and step-6d
+# GRANTs in INSTALL.md. Deploy it only if you want DABs to OWN those UC objects.
+#
+# IMPORTANT: a `bundle deploy` here CREATES the schema/volume. In an environment where they already
+# exist and are not bundle-managed, do NOT deploy this bundle (it would conflict) — keep the manual
+# SQL instead. `lifecycle.prevent_destroy` guards the data against `bundle destroy`.
+#
+# Targets deliberately set NO `mode: development` — development mode prefixes the schema NAME
+# ("[dev you]<schema>"), which must stay exact. Deploy with `-t <env> --profile <env>`.
+
+variables:
+  catalog:
+    description: UC catalog that holds the schema + artifacts volume
+    default: main
+  schema:
+    description: UC schema for model_deployments / model_lifecycle_events + the artifacts volume
+    default: default
+  app_grantee:
+    description: >-
+      Principal granted read access. Prefer a UC GROUP (avoids the app service-principal
+      chicken-and-egg: the app SP id is not a bundle reference), or pass the app SP application-id.
+    default: ""
+
+targets:
+  dev:
+    default: true
+  qa: {}
+  prod: {}

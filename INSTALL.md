@@ -31,6 +31,71 @@ on that machine — no dependency on any other environment.
 
 ---
 
+## Environments (dev / qa / prod)
+
+To deploy the **same code** to several environments with **different values** per environment
+(catalog, schema, warehouse, budget policy, app name, root path, job id), use a DABs **target** per
+environment. The target *names* live in the committed `databricks.yml`; the per-environment *values*
+stay in the **gitignored** `values.local.yml`, so nothing environment-specific is in git.
+
+**Steps 3–7 below are run once per environment**, selecting the target with `-t <env>` and its profile
+with `--profile <env>`. If you only need a single environment, ignore this section and use the default
+target as-is.
+
+**1. Declare the targets once** in each bundle's `databricks.yml` (both `deploy-job/` and `app/`):
+
+```yaml
+targets:
+  dev:  { mode: development, default: true }   # [dev you] name prefix, schedules paused — scratch env
+  qa:   { mode: production }                    # clean names, prod guardrails
+  prod: { mode: production }
+```
+
+**2. Put the per-environment values** in the gitignored `values.local.yml` — the existing `*.local.yml`
+include merges it — with one block per target. Deploy job:
+
+```yaml
+# deploy-job/values.local.yml
+targets:
+  dev:
+    workspace: { root_path: /Workspace/Users/you@client.com/model-deployer-dev/deploy-job }
+    variables: { catalog: rnd_dev,  schema: model_deployer, budget_policy_id: <dev-policy>,  cost_center: cc, team: mlops }
+  qa:
+    workspace: { root_path: /Workspace/Shared/model-deployer-qa/deploy-job }
+    variables: { catalog: rnd_qa,   schema: model_deployer, budget_policy_id: <qa-policy>,   cost_center: cc, team: mlops }
+  prod:
+    workspace: { root_path: /Workspace/Shared/model-deployer-prod/deploy-job }
+    variables: { catalog: rnd_prod, schema: model_deployer, budget_policy_id: <prod-policy>, cost_center: cc, team: mlops }
+```
+The app bundle's `values.local.yml` mirrors this with `app_name`, `sql_warehouse_id`, and `job_id` per
+target (each env's `job_id` comes from that env's deploy-job deploy — step 5).
+
+**3. One CLI profile per environment** (each is usually a different workspace = different host):
+
+```bash
+databricks auth login --host <DEV_URL>  --profile dev
+databricks auth login --host <QA_URL>   --profile qa
+databricks auth login --host <PROD_URL> --profile prod
+```
+
+**4. Deploy by selecting target + profile** (applies to every `bundle`/`apps` command in steps 5–6):
+
+```bash
+cd deploy-job
+databricks bundle deploy -t dev  --profile dev
+databricks bundle deploy -t qa   --profile qa
+databricks bundle deploy -t prod --profile prod
+```
+
+**Promotion** = the *same zip/commit* deployed to the next target — only the `values.local.yml` target
+block and the `--profile` change. Store each environment's real values in your deployment/secrets
+tooling, not in git.
+
+> Still deploy from a **non-git copy** (or `rm -rf .git`) in every environment — the git-provenance
+> rule in step 1 applies per deploy, regardless of target.
+
+---
+
 ## 1. Prerequisites (on the VDI)
 
 1. **Databricks CLI** ≥ v0.240 (this project was validated on v1.15.x). Check / install:
@@ -175,12 +240,13 @@ targets:
       cost_center: <your_cost_center>
       team: <your_team>
 ```
-Deploy and capture the job id:
+Deploy and capture the job id (**multi-env:** add `-t <env>` and use that env's `--profile`; the
+`values.local.yml` block for that target supplies the values):
 ```bash
 cd deploy-job
-databricks bundle validate --profile <PROFILE>
-databricks bundle deploy   --profile <PROFILE>
-databricks jobs list --profile <PROFILE> | grep mlops_deploy_model_job   # -> <JOB_ID>
+databricks bundle validate            --profile <PROFILE>   # add -t <env> for qa/prod
+databricks bundle deploy              --profile <PROFILE>   # add -t <env> for qa/prod
+databricks jobs list --profile <PROFILE> | grep mlops_deploy_model_job   # -> <JOB_ID> (per env)
 cd ..
 ```
 
@@ -220,8 +286,8 @@ targets:
 ### 6c. Create the app (uploads source + creates the app and its service principal)
 ```bash
 cd app
-databricks bundle validate --profile <PROFILE>
-databricks bundle deploy -t default --profile <PROFILE>
+databricks bundle validate           --profile <PROFILE>   # add -t <env> for qa/prod
+databricks bundle deploy -t default  --profile <PROFILE>   # -t <env> if you defined dev/qa/prod targets
 databricks apps get <APP_NAME> --profile <PROFILE> -o json   # note service_principal_* -> <APP_SP_ID>
 ```
 
@@ -245,6 +311,74 @@ cd ..
 ```
 This runs `npm install` + type-generation + build on Databricks compute and starts the app. Repeat
 6c (`bundle deploy`) + 6e (`apps deploy`) whenever you change app source.
+
+### 6f. (Optional) Automate the UC grants via the bundle instead of step 6d
+
+Yes — most of step 6 can be folded into `bundle deploy`. Some of it already is: the app's service
+principal is **created** by the app deploy, and its **warehouse `CAN_USE` + job `CAN_MANAGE_RUN`**
+grants are declared as app *resources* in `app/databricks.yml` (applied automatically). The remaining
+**UC** grants can also be declared in the bundle so a deploy applies them — with two facts to design
+around (both confirmed against the DABs schema):
+
+- **No table-level grant.** DABs has resource types for `Catalog` / `Schema` / `Volume` (with a
+  `grants:` block) but **not for tables**. So grant **`SELECT` at the schema level** — it covers
+  `model_deployments`, `model_lifecycle_events`, and any future table in the schema.
+- **The app SP id isn't a bundle reference.** The `app` resource does not expose the service-principal
+  id it mints, so the bundle can't grant that SP in the *same* first deploy. Two ways around it:
+  - **Grant to a UC group (recommended).** Grant to a group in the bundle (static), and add each
+    environment's app SP to that group once. Fully declarative, one-shot, identical across dev/qa/prod.
+  - **Grant to the SP by variable.** Deploy the app once, read its SP id (step 6c), put it in
+    `values.local.yml`, and re-deploy — grants apply on the second deploy.
+
+This is shipped as the optional **`governance/`** bundle (a separate DABs bundle with dev/qa/prod
+targets). Configure it like the others and deploy per env — it creates+grants instead of the manual
+step‑4 DDL / step‑6d SQL:
+```bash
+cp governance/values.local.example.yml governance/values.local.yml   # set catalog, schema, app_grantee
+cd governance
+databricks bundle deploy -t <env> --profile <env>
+cd ..
+```
+> Deploy `governance/` **only** in an environment where you want DABs to own the schema/volume — in
+> one where they already exist unmanaged, a deploy would conflict; keep the manual SQL there instead.
+
+Its `resources/uc.yml` is:
+
+```yaml
+variables:
+  catalog: {}
+  schema: {}
+  app_grantee:
+    description: UC group (recommended) or app SP application-id that gets read access
+
+resources:
+  schemas:
+    app_schema:
+      catalog_name: ${var.catalog}
+      name: ${var.schema}
+      grants:
+        - principal: ${var.app_grantee}
+          privileges: [USE_SCHEMA, SELECT]     # SELECT here covers every table in the schema
+      lifecycle: { prevent_destroy: true }     # don't drop the schema (and its data) on `bundle destroy`
+  volumes:
+    artifacts:
+      catalog_name: ${var.catalog}
+      schema_name: ${var.schema}
+      name: artifacts
+      grants:
+        - principal: ${var.app_grantee}
+          privileges: [READ_VOLUME]            # add WRITE_VOLUME if users upload artifacts via UC
+      lifecycle: { prevent_destroy: true }
+```
+
+`USE CATALOG` on a shared/pre-existing catalog stays a one-line manual grant (or add a bundle-managed
+`catalogs:` resource grant if the bundle owns the catalog). Note that a bundle-managed schema/volume is
+**owned by the bundle** — `bundle destroy` would drop it, so keep `prevent_destroy: true` on for qa/prod
+(and be aware the bundle now reconciles those UC objects on every deploy).
+
+> **Simpler alternative that never takes ownership of UC objects:** keep the idempotent `GRANT` SQL from
+> step 6d in a script and run it once per environment (safe to re-run). Bundle-managed grants pay off
+> mainly when you're standing up many environments and want a single declarative source of truth.
 
 ---
 

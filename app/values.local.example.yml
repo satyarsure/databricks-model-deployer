@@ -1,10 +1,29 @@
 # Copy to values.local.yml (gitignored) and fill in your deployment's real values.
 # Merged into databricks.yml via the `include` glob at deploy time.
+#
+# One block per environment target (dev / qa / prod) — keep only the ones you use, and deploy
+# each with `-t <env> --profile <env>`. The workspace HOST comes from the CLI --profile, not here.
+# `job_id` is that environment's deploy-job id (from the deploy-job deploy in the same env).
+# For a single environment, keep just the `dev` block.
 targets:
-  default:
+  dev:
     workspace:
-      root_path: /Workspace/Users/<you>@example.com/<folder>/app
+      root_path: /Workspace/Users/<you>@example.com/model-deployer-dev/app
     variables:
-      app_name: <your-app-name>
-      sql_warehouse_id: <warehouse-id>
-      job_id: <deploy-job-id>
+      app_name: <dev-app-name>
+      sql_warehouse_id: <dev-warehouse-id>
+      job_id: <dev-deploy-job-id>
+  qa:
+    workspace:
+      root_path: /Workspace/Shared/model-deployer-qa/app
+    variables:
+      app_name: <qa-app-name>
+      sql_warehouse_id: <qa-warehouse-id>
+      job_id: <qa-deploy-job-id>
+  prod:
+    workspace:
+      root_path: /Workspace/Shared/model-deployer-prod/app
+    variables:
+      app_name: <prod-app-name>
+      sql_warehouse_id: <prod-warehouse-id>
+      job_id: <prod-deploy-job-id>

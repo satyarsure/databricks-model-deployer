@@ -36,8 +36,13 @@ resources:
             permission: CAN_MANAGE_RUN
 
 targets:
-  default:
+  # One target per environment. The target NAMES live here (committed); the per-environment
+  # VALUES that differ (workspace host via --profile, root_path, app_name, warehouse/job IDs)
+  # come from the gitignored values.local.yml — see values.local.example.yml.
+  dev:
     default: true
-    # Workspace host comes from the CLI `--profile`. app_name, root_path, and the
-    # warehouse/job IDs are supplied at deploy time via a gitignored values.local.yml
-    # (see values.local.example.yml).
+    mode: development
+  qa:
+    mode: production
+  prod:
+    mode: production

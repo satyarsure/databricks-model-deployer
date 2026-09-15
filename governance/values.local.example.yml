@@ -1,0 +1,28 @@
+# Copy to values.local.yml (gitignored) and fill in your real values.
+# Merged into databricks.yml via the `include` glob at deploy time.
+#
+# One block per environment target (dev / qa / prod). Deploy with `-t <env> --profile <env>`.
+# `app_grantee` is the principal to grant read access to — a UC group (recommended) or the app's
+# service-principal application-id (from `databricks apps get <APP_NAME> -o json`).
+targets:
+  dev:
+    workspace:
+      root_path: /Workspace/Users/<you>@example.com/model-deployer-dev/governance
+    variables:
+      catalog: <dev_catalog>
+      schema: <dev_schema>
+      app_grantee: <dev-uc-group-or-app-sp-application-id>
+  qa:
+    workspace:
+      root_path: /Workspace/Shared/model-deployer-qa/governance
+    variables:
+      catalog: <qa_catalog>
+      schema: <qa_schema>
+      app_grantee: <qa-uc-group-or-app-sp-application-id>
+  prod:
+    workspace:
+      root_path: /Workspace/Shared/model-deployer-prod/governance
+    variables:
+      catalog: <prod_catalog>
+      schema: <prod_schema>
+      app_grantee: <prod-uc-group-or-app-sp-application-id>

@@ -1,0 +1,34 @@
+resources:
+  schemas:
+    app_schema:
+      catalog_name: ${var.catalog}
+      name: ${var.schema}
+      comment: Model Deployer — status/lifecycle tables + artifacts volume
+      grants:
+        # SELECT at the schema level covers model_deployments, model_lifecycle_events, and any
+        # future table in the schema (DABs has no per-table grant resource).
+        - principal: ${var.app_grantee}
+          privileges:
+            - USE_SCHEMA
+            - SELECT
+      lifecycle:
+        # Never drop the schema (and its data) on `bundle destroy`.
+        prevent_destroy: true
+
+  volumes:
+    artifacts:
+      catalog_name: ${var.catalog}
+      schema_name: ${var.schema}
+      name: artifacts
+      volume_type: MANAGED
+      comment: Model Deployer — uploaded/test model artifacts
+      grants:
+        - principal: ${var.app_grantee}
+          privileges:
+            - READ_VOLUME
+            # - WRITE_VOLUME   # uncomment if end users upload artifacts through UC
+      lifecycle:
+        prevent_destroy: true
+
+# USE CATALOG on a shared/pre-existing catalog stays a one-line manual grant. If this bundle should
+# also own the catalog, add a `catalogs:` resource here with its own grants block.

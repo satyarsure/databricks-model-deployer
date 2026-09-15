@@ -39,6 +39,7 @@ Deploy job (DABs, serverless) — one notebook, three stages:
 | `app/` | The React/AppKit app (frontend + Express server). Deployed to Databricks Apps. |
 | `deploy-job/` | The DABs bundle for the deploy workflow job (`src/notebooks/deploy_model.py`). |
 | `deploy-job/requirements.txt` | Pinned dependency set for the job's serverless environment. |
+| `governance/` | Optional DABs bundle that declaratively creates the UC schema + `artifacts` volume and grants the app principal read access (alternative to the manual DDL/GRANTs — see [INSTALL.md](INSTALL.md) §6f). |
 | `testing/` | Manual-testing fixtures (`setup_test_artifacts.py`) and guide (`README.md`). |
 | `Images/` | UI mockups. |
 

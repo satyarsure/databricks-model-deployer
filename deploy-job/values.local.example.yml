@@ -1,12 +1,34 @@
 # Copy to values.local.yml (gitignored) and fill in your deployment's real values.
-# This file is merged into databricks.yml via the `include` glob at deploy time.
+# Merged into databricks.yml via the `include` glob at deploy time.
+#
+# One block per environment target (dev / qa / prod) — keep only the ones you use, and deploy
+# each with `-t <env> --profile <env>`. The workspace HOST comes from the CLI --profile, not here.
+# For a single environment, keep just the `dev` block.
 targets:
   dev:
     workspace:
-      root_path: /Workspace/Users/<you>@example.com/<folder>/deploy-job
+      root_path: /Workspace/Users/<you>@example.com/model-deployer-dev/deploy-job
     variables:
-      catalog: <your_catalog>
-      schema: <your_schema>
-      budget_policy_id: <your-serverless-budget-policy-id>
+      catalog: <dev_catalog>
+      schema: <dev_schema>
+      budget_policy_id: <dev-serverless-budget-policy-id>
+      cost_center: <your_cost_center>
+      team: <your_team>
+  qa:
+    workspace:
+      root_path: /Workspace/Shared/model-deployer-qa/deploy-job
+    variables:
+      catalog: <qa_catalog>
+      schema: <qa_schema>
+      budget_policy_id: <qa-serverless-budget-policy-id>
+      cost_center: <your_cost_center>
+      team: <your_team>
+  prod:
+    workspace:
+      root_path: /Workspace/Shared/model-deployer-prod/deploy-job
+    variables:
+      catalog: <prod_catalog>
+      schema: <prod_schema>
+      budget_policy_id: <prod-serverless-budget-policy-id>
       cost_center: <your_cost_center>
       team: <your_team>
