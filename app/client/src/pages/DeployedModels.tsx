@@ -161,7 +161,8 @@ function LifecycleTimeline({
       </div>
     );
   }
-  if (error) {
+  // Keep the last-good events on a transient poll error; only surface it if we have nothing.
+  if (error && events.length === 0) {
     return (
       <div className="p-3 text-xs text-destructive">Failed to load lifecycle: {error}</div>
     );
@@ -440,7 +441,9 @@ function DeploymentsTable({
     );
   }
 
-  if (error) {
+  // Only show the error banner when we have nothing cached to show. A transient poll failure
+  // (e.g. a scale-to-zero wake) must not blank an already-populated board — keep the last-good rows.
+  if (error && allRows.length === 0) {
     return (
       <div className="m-4 rounded-md bg-destructive/10 p-3 text-sm text-destructive">
         Failed to load deployments: {error}
