@@ -66,6 +66,17 @@ const deploySpecSchema = z.object({
   eval_dataset: z.string().optional().default(''),
   serverless_usage_policy: z.string().min(1),
   tags: z.record(z.string(), z.any()).default({}),
+  // Optional serving-endpoint access control, grouped by permission level. Each entry is a
+  // principal: an email (user), a 36-char UUID (service principal), or a name (group). The UI
+  // submitter is granted CAN_MANAGE by the deploy job BY DEFAULT — unless they are listed here
+  // with a level, which is then honored. Applied by the deploy notebook after the endpoint exists.
+  permissions: z
+    .object({
+      can_manage: z.array(z.string()).optional(),
+      can_query: z.array(z.string()).optional(),
+      can_view: z.array(z.string()).optional(),
+    })
+    .optional(),
   uc: z.object({
     catalog: z.string().min(1),
     schema: z.string().min(1),
@@ -148,7 +159,7 @@ createApp({
                     uc_schema, uc_model, model_version, status, stage, error_message,
                     endpoint_name, invoke_url, experiment_name, eval_dataset,
                     serverless_usage_policy, tags, artifacts_json, input_schema_json,
-                    output_schema_json, compute_type, gpu_type, compute_size,
+                    output_schema_json, permissions_json, compute_type, gpu_type, compute_size,
                     scale_to_zero::text, deployed_by, deployed_date, updated_at
              FROM ${DEPLOYMENTS}
              ORDER BY deployed_date DESC NULLS LAST, updated_at DESC NULLS LAST
@@ -269,10 +280,10 @@ createApp({
                (deployment_id, model_name, description, uc_catalog, uc_schema, uc_model,
                 uc_full_name, experiment_name, eval_dataset, serverless_usage_policy, tags,
                 compute_type, gpu_type, compute_size, scale_to_zero, artifacts_json,
-                input_schema_json, output_schema_json, status, stage, deployed_by,
-                deployed_date, updated_at)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,
-                     'IN_PROGRESS','submitted',$19, now(), now())
+                input_schema_json, output_schema_json, permissions_json, status, stage,
+                deployed_by, deployed_date, updated_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,
+                     'IN_PROGRESS','submitted',$20, now(), now())
              ON CONFLICT (deployment_id) DO NOTHING`,
             [
               deploymentId, spec.name, spec.description, uc.catalog, uc.schema, uc.model,
@@ -280,7 +291,8 @@ createApp({
               JSON.stringify(spec.tags ?? {}), spec.compute.compute_type,
               spec.compute.gpu_type ?? null, spec.compute.size, spec.compute.scale_to_zero,
               JSON.stringify(spec.artifacts ?? []), JSON.stringify(spec.input_schema ?? []),
-              JSON.stringify(spec.output_schema ?? []), email,
+              JSON.stringify(spec.output_schema ?? []), JSON.stringify(spec.permissions ?? {}),
+              email,
             ],
           );
           await pgQuery(

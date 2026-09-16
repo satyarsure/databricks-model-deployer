@@ -31,7 +31,7 @@ Deploy job (DABs, serverless) — one notebook, three stages:
                 variant to UC (a variant may instead reference an existing registered version)
    Validator  → load the registered pyfunc, smoke-test predict, optional mlflow.evaluate vs an eval dataset
    Deployer   → create/update the serving endpoint (traffic split, compute, scale-to-zero, tags,
-                budget policy, inference tables); set the UC @champion alias
+                budget policy, inference tables, access permissions); set the UC @champion alias
    (every stage writes status to Lakebase model_deployments and appends to model_lifecycle_events)
 
 Lakebase Postgres (schema `model_deployer`) — the app's operational store:
@@ -79,7 +79,7 @@ operational store — chosen over a SQL warehouse because the Deployed Models bo
 frequently-updated status view that needs point reads at OLTP latency:
 
 - **`model_deployments`** — one row per deployment (name, UC name, version, status/stage, endpoint,
-  compute, tags, schemas, budget policy, timestamps). Upserted by `deployment_id`.
+  compute, tags, schemas, budget policy, endpoint permissions, timestamps). Upserted by `deployment_id`.
 - **`model_lifecycle_events`** — append-only audit trail of every stage/status transition.
 
 The **deploy job owns the schema**: on each run it self-creates the schema + tables (`CREATE …
@@ -163,6 +163,29 @@ endpoint (and re-synced on updates) and persisted in `model_deployments.tags`. B
 (`cost_center`, `team`), this is the extensible place for **governance/ownership metadata** — e.g.
 use-case / APMS ID, business / technical / support owner, environment, GxP classification,
 deployment mode — without any schema change, so new fields can be added as more workloads onboard.
+
+## Endpoint permissions
+
+The form's optional **Endpoint permissions** field is a JSON object that grants principals access to
+the serving endpoint, grouped by level:
+
+```json
+{
+  "can_manage": ["someone@company.com"],
+  "can_query": ["a-databricks-group"],
+  "can_view": ["9b1a2c3d-4e5f-6789-abcd-ef0123456789"]
+}
+```
+
+- Levels are `can_manage` / `can_query` / `can_view`. Each principal is classified by shape: an
+  **email** → user, a **36-char UUID** → service principal, anything else → **group**. List all
+  principals for a level in **one array** (duplicate keys are rejected by the form).
+- The **user who submits the deploy** (captured from the app's signed-in identity — which may differ
+  from the deploy job's run-as identity) is granted **`CAN_MANAGE` by default**, *unless* they are
+  listed explicitly, in which case the level you gave is honored.
+- Applied by the deploy job once the endpoint exists, as a **PATCH (merge)** — the endpoint
+  owner/creator and any pre-existing ACLs are preserved. Non-fatal (a permission error is logged as a
+  lifecycle note and never fails the deployment) and persisted in `model_deployments.permissions_json`.
 
 ## Credits
 

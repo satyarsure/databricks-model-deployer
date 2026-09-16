@@ -33,6 +33,7 @@ interface Prefill {
   ucModel: string;
   usagePolicy: string;
   tagsText: string;
+  permissionsText: string;
   computeType: 'cpu' | 'gpu';
   gpuType: string;
   size: Size;
@@ -76,6 +77,57 @@ function parseSchema(text: string, requireNonEmpty: boolean): SchemaParse {
   return { ok: true, fields };
 }
 
+const PERM_KEYS = ['can_manage', 'can_query', 'can_view'] as const;
+
+// Placeholder / example for the optional serving-endpoint permissions field.
+const PERMISSIONS_PLACEHOLDER = `{
+  "can_manage": ["greg.mara@databricks.com"],
+  "can_query": ["jeff.shmain@databricks.com"],
+  "can_view": ["usama.arif@databricks.com"]
+}`;
+
+type PermParse =
+  | { ok: true; value: Record<string, string[]> | null }
+  | { ok: false; error: string };
+
+// Validate the optional serving-endpoint permissions JSON: an object keyed by permission level
+// (can_manage / can_query / can_view), each an array of principal strings (user email, group
+// name, or service-principal UUID). Empty input is valid (null → omit from the spec).
+function parsePermissions(text: string): PermParse {
+  const t = (text || '').trim();
+  if (!t) return { ok: true, value: null };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(t);
+  } catch {
+    return { ok: false, error: 'must be valid JSON' };
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed))
+    return { ok: false, error: 'must be a JSON object keyed by can_manage / can_query / can_view' };
+  // JSON.parse silently keeps only the LAST value for a duplicated key, which would drop
+  // principals without warning (e.g. two "can_view" entries). Detect that and reject it so the
+  // user merges all principals for a level into one array.
+  const rawKeyCount = (t.match(/"can_(?:manage|query|view)"\s*:/g) || []).length;
+  const distinctKeyCount = Object.keys(parsed as Record<string, unknown>).filter((k) =>
+    (PERM_KEYS as readonly string[]).includes(k),
+  ).length;
+  if (rawKeyCount > distinctKeyCount)
+    return {
+      ok: false,
+      error: 'has a duplicated permission key — put all principals for a level in one array',
+    };
+  const out: Record<string, string[]> = {};
+  for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+    if (!(PERM_KEYS as readonly string[]).includes(k))
+      return { ok: false, error: `unknown key "${k}" (use can_manage, can_query, or can_view)` };
+    if (!Array.isArray(v) || v.some((x) => typeof x !== 'string'))
+      return { ok: false, error: `"${k}" must be an array of principal strings` };
+    const cleaned = (v as string[]).map((s) => s.trim()).filter(Boolean);
+    if (cleaned.length) out[k] = cleaned;
+  }
+  return { ok: true, value: Object.keys(out).length ? out : null };
+}
+
 // Turn a previously-deployed row into initial form values for a new version.
 function parsePrefill(row: DeploymentRow | null): Prefill | null {
   if (!row) return null;
@@ -117,6 +169,10 @@ function parsePrefill(row: DeploymentRow | null): Prefill | null {
     ucModel: row.uc_model ?? '',
     usagePolicy: row.serverless_usage_policy ?? '',
     tagsText: row.tags ?? '{\n  "team": "mlops"\n}',
+    // Only prefill permissions when the stored value is a non-empty object; otherwise leave
+    // blank so the placeholder sample shows.
+    permissionsText:
+      row.permissions_json && row.permissions_json.trim() !== '{}' ? row.permissions_json : '',
     computeType: row.compute_type === 'gpu' ? 'gpu' : 'cpu',
     gpuType: row.gpu_type || 'A10',
     size,
@@ -306,6 +362,7 @@ export function DeployModel({
   const [ucModel, setUcModel] = useState(pf?.ucModel ?? '');
   const [usagePolicy, setUsagePolicy] = useState(pf?.usagePolicy ?? '');
   const [tagsText, setTagsText] = useState(pf?.tagsText ?? '{\n  "team": "mlops"\n}');
+  const [permissionsText, setPermissionsText] = useState(pf?.permissionsText ?? '');
   const [computeType, setComputeType] = useState<'cpu' | 'gpu'>(pf?.computeType ?? 'cpu');
   const [gpuType, setGpuType] = useState(pf?.gpuType ?? 'A10');
   const [size, setSize] = useState<Size>(pf?.size ?? 'SMALL');
@@ -364,6 +421,8 @@ export function DeployModel({
     } catch {
       return 'Tags must be valid JSON.';
     }
+    const permCheck = parsePermissions(permissionsText);
+    if (!permCheck.ok) return `Endpoint permissions ${permCheck.error}.`;
     return null;
   }
 
@@ -381,6 +440,12 @@ export function DeployModel({
       const outParsed = parseSchema(outputSchemaText, true);
       if (!inParsed.ok || !outParsed.ok) {
         setError('Input/Output schema must be valid JSON.');
+        setSubmitting(false);
+        return;
+      }
+      const permParsed = parsePermissions(permissionsText);
+      if (!permParsed.ok) {
+        setError(`Endpoint permissions ${permParsed.error}.`);
         setSubmitting(false);
         return;
       }
@@ -420,6 +485,8 @@ export function DeployModel({
           size,
           scale_to_zero: scaleToZero,
         },
+        // Optional: endpoint ACLs. The submitter gets CAN_MANAGE by default (unless listed here).
+        ...(permParsed.value ? { permissions: permParsed.value } : {}),
       };
       const res = await fetch('/api/deploy', {
         method: 'POST',
@@ -710,6 +777,18 @@ export function DeployModel({
             className={`${inputCls} min-h-[80px] font-mono text-xs`}
             value={tagsText}
             onChange={(e) => setTagsText(e.target.value)}
+          />
+        </Section>
+
+        <Section
+          title="Endpoint permissions"
+          hint="Optional JSON granting others access to the serving endpoint, grouped by level (can_manage / can_query / can_view). Each entry is a user email, a group name, or a service-principal UUID; list all principals for a level in one array. You (the deploying user) get CAN_MANAGE by default unless you list yourself here with a different level, which is then honored (handled server-side, since the deploy job may run as a different identity). Leave blank to grant no one else."
+        >
+          <textarea
+            className={`${inputCls} min-h-[120px] font-mono text-xs`}
+            placeholder={PERMISSIONS_PLACEHOLDER}
+            value={permissionsText}
+            onChange={(e) => setPermissionsText(e.target.value)}
           />
         </Section>
 

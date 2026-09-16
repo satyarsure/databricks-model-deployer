@@ -45,6 +45,7 @@ function makeOptimisticRow(p: PendingDeployment): DeploymentRow {
     artifacts_json: null,
     input_schema_json: null,
     output_schema_json: null,
+    permissions_json: null,
     compute_type: null,
     gpu_type: null,
     compute_size: null,

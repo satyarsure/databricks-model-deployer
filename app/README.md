@@ -3,7 +3,8 @@
 A Databricks App powered by [AppKit](https://developers.databricks.com/docs/appkit/v0/), featuring React, TypeScript, and Tailwind CSS.
 
 **Enabled plugins:**
-- **Analytics** -- SQL query execution against Databricks SQL Warehouses
+- **Lakebase** -- Postgres access to the app's operational store (deployment status + lifecycle)
+- **Jobs** -- triggers the deploy workflow job
 - **Server** -- Express HTTP server with static file serving and Vite dev mode
 
 ## Prerequisites
@@ -163,13 +164,11 @@ databricks apps deploy -t prod
 ```
 * client/          # React frontend
   * src/           # Source code
+    * lib/useApiQuery.ts  # fetch hook for the app's Lakebase-backed JSON routes
   * public/        # Static assets
 * server/          # Express backend
-  * server.ts      # Server entry point
-  * routes/        # Routes
+  * server.ts      # Server entry point (Lakebase read routes + /api/deploy)
 * shared/          # Shared types
-* config/          # Configuration
-  * queries/       # SQL query files
 * databricks.yml   # Bundle configuration
 * app.yaml         # App configuration
 * .env.example     # Environment variables example

@@ -168,6 +168,9 @@ block and the `--profile` change. Store each environment's real values in your s
 **The deploy job's run identity** (the deploying user, or a job-owner SP) needs:
 - `CREATE MODEL` / `USE` on `<CATALOG>.<SCHEMA>`, permission to create **serving endpoints**, read
   access to wherever artifacts live (the UC volume and/or S3), and use of the budget policy.
+- It also applies the deploy form's optional **endpoint permissions** (and grants the submitting
+  user `CAN_MANAGE`); as the endpoint's creator it already has `CAN_MANAGE`, so no extra grant is
+  needed (a permission-set failure is non-fatal and never fails the deployment).
 - **Lakebase access**: it must be able to connect to the database and create/own `<PG_SCHEMA>`. The
   Lakebase project **owner** has this; a job SP needs to be added as a Postgres role with create
   rights (see the databricks-lakebase docs). The job authenticates with an OAuth DB credential for

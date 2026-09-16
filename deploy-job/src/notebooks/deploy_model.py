@@ -148,6 +148,109 @@ def sanitize_endpoint(name):
     n = re.sub(r"[^A-Za-z0-9_-]", "_", name)
     return n[:60].strip("_") or "endpoint"
 
+# Serving-endpoint access control. spec["permissions"] (optional) grants principals, grouped
+# by level, and is honored exactly as given:
+#   {"can_manage": [...], "can_query": [...], "can_view": [...]}
+# The person who submitted the deploy from the UI (spec["deployed_by"], captured from the app's
+# x-forwarded-email — which may differ from the job's run-as identity) gets CAN_MANAGE by
+# DEFAULT, but only when the UI didn't already assign them a level (so listing the submitter
+# under can_view/can_query wins). Each principal is classified by shape: contains "@" -> user,
+# 36-char UUID -> service principal, otherwise a group. Applied as a PATCH (merge) so the
+# endpoint owner and any existing ACLs are preserved. Non-fatal: a failure never fails deploy.
+_PERM_UUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
+def apply_endpoint_permissions(endpoint_name):
+    try:
+        from databricks.sdk.service.serving import (
+            ServingEndpointAccessControlRequest as _ACR,
+            ServingEndpointPermissionLevel as _PL,
+        )
+    except Exception as ie:
+        print(f"[deployer] permissions skipped (SDK lacks serving permission types): {ie}")
+        return
+    perms = spec.get("permissions") or {}
+    level_by_key = {"can_manage": _PL.CAN_MANAGE, "can_query": _PL.CAN_QUERY, "can_view": _PL.CAN_VIEW}
+    rank = {_PL.CAN_VIEW: 1, _PL.CAN_QUERY: 2, _PL.CAN_MANAGE: 3}
+    # principal -> level. Apply the UI's explicit permissions FIRST so exactly what was entered is
+    # honored (if a principal appears under multiple levels, the highest requested level wins).
+    wanted = {}
+    for key, lvl in level_by_key.items():
+        for p in (perms.get(key) or []):
+            p = str(p).strip()
+            if not p:
+                continue
+            if p not in wanted or rank[lvl] > rank[wanted[p]]:
+                wanted[p] = lvl
+    # The UI submitter gets CAN_MANAGE by DEFAULT — but only if the UI did NOT assign them a level
+    # explicitly. So listing the submitter under can_view/can_query is honored, not overridden.
+    deployer = (spec.get("deployed_by") or "").strip()
+    if deployer and deployer not in wanted:
+        wanted[deployer] = _PL.CAN_MANAGE
+    if not wanted:
+        return
+    acl = []
+    for p, lvl in wanted.items():
+        if "@" in p:
+            acl.append(_ACR(user_name=p, permission_level=lvl))
+        elif _PERM_UUID.match(p):
+            acl.append(_ACR(service_principal_name=p, permission_level=lvl))
+        else:
+            acl.append(_ACR(group_name=p, permission_level=lvl))
+    try:
+        ep = _wsc.serving_endpoints.get(endpoint_name)
+        _wsc.serving_endpoints.update_permissions(serving_endpoint_id=ep.id, access_control_list=acl)
+        print(f"[deployer] applied {len(acl)} endpoint permission(s): "
+              + ", ".join(f"{p}={lvl.value}" for p, lvl in wanted.items()))
+        log_event("deployer", "IN_PROGRESS", f"applied {len(acl)} endpoint permission(s)",
+                  version=globals().get("model_version_str", ""))
+    except Exception as pe:
+        print(f"[deployer] permissions warning (non-fatal): {pe}")
+        log_event("deployer", "IN_PROGRESS", f"permission apply warning: {str(pe)[:200]}",
+                  version=globals().get("model_version_str", ""))
+
+# Enable AI Gateway (usage tracking + payload inference tables). Idempotent and self-healing:
+#   * If the endpoint already has both enabled, leave it (a re-PUT with the same prefix would hit
+#     "table already exists").
+#   * The default inference-table prefix can collide with a Delta table left behind by a PRIOR
+#     deployment of the same endpoint name (the table survives in UC even if the endpoint was
+#     deleted/recreated). On that "already exists" error, retry with a per-deployment prefix so a
+#     fresh table is created; if that still fails, fall back to usage-tracking-only. Non-fatal.
+def enable_ai_gateway(endpoint_name):
+    try:
+        cur = _wsc.serving_endpoints.get(endpoint_name).ai_gateway
+        if (cur and cur.usage_tracking_config and cur.usage_tracking_config.enabled
+                and cur.inference_table_config and cur.inference_table_config.enabled):
+            print("[deployer] AI Gateway already enabled; leaving as-is")
+            return
+    except Exception:
+        pass
+
+    def _put(prefix):
+        kw = {"name": endpoint_name, "usage_tracking_config": AiGatewayUsageTrackingConfig(enabled=True)}
+        if prefix is not None:
+            kw["inference_table_config"] = AiGatewayInferenceTableConfig(
+                catalog_name=CATALOG, schema_name=SCHEMA, table_name_prefix=prefix, enabled=True)
+        _wsc.serving_endpoints.put_ai_gateway(**kw)
+
+    try:
+        _put(f"{endpoint_name}_payload")
+        print("[deployer] AI Gateway: usage tracking + inference tables enabled")
+    except Exception as ge:
+        if "already exists" in str(ge).lower():
+            alt = f"{endpoint_name}_{deployment_id}"
+            try:
+                _put(alt)
+                print(f"[deployer] AI Gateway enabled with fresh inference-table prefix '{alt}' "
+                      f"(default prefix's table already existed from a prior deploy)")
+            except Exception as ge2:
+                try:
+                    _put(None)  # usage tracking only, so at least usage is captured
+                    print(f"[deployer] AI Gateway: usage tracking enabled; inference table skipped ({ge2})")
+                except Exception as ge3:
+                    print(f"[deployer] AI Gateway warning (non-fatal): {ge3}")
+        else:
+            print(f"[deployer] AI Gateway warning (non-fatal): {ge}")
+
 def log_event(stage, status, message="", version=""):
     """Append an immutable lifecycle event (full transition history / audit trail)."""
     import time as _t
@@ -179,10 +282,13 @@ def _pg_init():
           serverless_usage_policy TEXT, tags TEXT,
           compute_type TEXT, gpu_type TEXT, compute_size TEXT, scale_to_zero BOOLEAN,
           artifacts_json TEXT, input_schema_json TEXT, output_schema_json TEXT,
+          permissions_json TEXT,
           endpoint_name TEXT, invoke_url TEXT, status TEXT, stage TEXT, error_message TEXT,
           deployed_by TEXT, deployed_date TIMESTAMPTZ, updated_at TIMESTAMPTZ, run_id TEXT
         )
     """)
+    # Migrate tables created before permissions were added (idempotent, no-op once present).
+    _pg_exec(f'ALTER TABLE {PG_SCHEMA}.model_deployments ADD COLUMN IF NOT EXISTS permissions_json TEXT')
     _pg_exec(f"""
         CREATE TABLE IF NOT EXISTS {PG_SCHEMA}.model_lifecycle_events (
           event_id BIGINT PRIMARY KEY, deployment_id BIGINT, model_name TEXT, uc_full_name TEXT,
@@ -227,6 +333,7 @@ merge_status(
     artifacts_json=json.dumps(spec.get("artifacts", [])),
     input_schema_json=json.dumps(spec.get("input_schema", [])),
     output_schema_json=json.dumps(spec.get("output_schema", [])),
+    permissions_json=json.dumps(spec.get("permissions", {})),
     endpoint_name=endpoint_name, status="IN_PROGRESS", stage="wrapper",
     deployed_by=spec.get("deployed_by"), run_id=run_id,
 )
@@ -490,16 +597,10 @@ try:
             kw = {k: v for k, v in kw.items() if k in _allowed}
         w.serving_endpoints.create_and_wait(**kw)
 
-    try:
-        w.serving_endpoints.put_ai_gateway(
-            name=endpoint_name,
-            usage_tracking_config=AiGatewayUsageTrackingConfig(enabled=True),
-            inference_table_config=AiGatewayInferenceTableConfig(
-                catalog_name=CATALOG, schema_name=SCHEMA,
-                table_name_prefix=f"{endpoint_name}_payload", enabled=True))
-        print("[deployer] AI Gateway: usage tracking + inference tables enabled")
-    except Exception as ge:
-        print(f"[deployer] AI Gateway warning (non-fatal): {ge}")
+    enable_ai_gateway(endpoint_name)
+
+    # Access control: the UI submitter gets CAN_MANAGE, plus any principals from spec.permissions.
+    apply_endpoint_permissions(endpoint_name)
 
     # Lifecycle: mark the active (highest-traffic) version as @champion in UC.
     try:

@@ -415,6 +415,52 @@ The `gpu_type` is recorded as an endpoint tag; the GPU tier is encoded by the wo
 
 ---
 
+## TC10 — Serving-endpoint permissions ⭐
+
+Grant others access to the serving endpoint via the optional **Endpoint permissions** field (JSON).
+The person deploying from the UI is granted `CAN_MANAGE` **by default** (even though the deploy job
+runs as a different identity) — *unless* you list them explicitly, in which case the level you gave
+is honored. Each entry is a user email, a group name, or a service-principal UUID; list all
+principals for a level in **one array** (a duplicated key like two `can_view` entries is rejected).
+
+| field | value |
+|---|---|
+| Model Name | `house-price-perms` |
+| Artifact | UC Volume · `.../test_models/house_price_linreg.pkl` |
+| Experiment name | `<experiment>` |
+| UC Model name | `<catalog>` · `<schema>` · `house_price_perms` |
+| Serverless usage policy | `<budget-policy-id>` |
+| Compute | CPU · SMALL |
+
+Endpoint permissions (paste into the field):
+```json
+{
+  "can_manage": ["greg.mara@databricks.com"],
+  "can_query": ["jeff.shmain@databricks.com"],
+  "can_view": ["usama.arif@databricks.com"]
+}
+```
+
+**Expected:** deployment completes; the endpoint's ACL contains greg → CAN_MANAGE, jeff → CAN_QUERY,
+usama → CAN_VIEW, plus **the deploying user → CAN_MANAGE** (added by default when not listed) and the
+endpoint owner/creator → CAN_MANAGE. Applied as a merge (PATCH), so the owner and any existing grants
+are preserved; a permission failure is non-fatal (logged as a lifecycle note, deployment still completes).
+
+> **Honoring an explicit level for the submitter:** if you deploy *as* one of these users and list
+> that same user under `can_view`/`can_query`, the endpoint shows them at that level — the default
+> `CAN_MANAGE` applies only when the submitter isn't listed. (Verified: deploying as
+> `greg.mara@databricks.com` with greg under `can_view` yields greg → CAN_VIEW.)
+
+**Verify the ACL:**
+```bash
+EID=$(databricks serving-endpoints get house_price_perms_endpoint --profile <PROFILE> -o json | jq -r '.id')
+databricks permissions get serving-endpoints "$EID" --profile <PROFILE> -o json \
+  | jq -r '.access_control_list[] | "\(.user_name // .group_name // .service_principal_name) -> \([.all_permissions[].permission_level] | join(","))"'
+```
+
+> Leave the field blank to grant no one else (the deploying user still gets `CAN_MANAGE`). Keys must
+> be `can_manage` / `can_query` / `can_view`, each an array of principal strings.
+
 ## What to check in the UI (every case)
 
 - **Deployed Models** row appears **immediately** as *Deploy in progress* with a real "submitted"

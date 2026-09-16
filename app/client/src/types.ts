@@ -21,6 +21,7 @@ export interface DeploymentRow {
   artifacts_json: string | null;
   input_schema_json: string | null;
   output_schema_json: string | null;
+  permissions_json: string | null;
   compute_type: string | null;
   gpu_type: string | null;
   compute_size: string | null;
