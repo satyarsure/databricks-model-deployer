@@ -46,6 +46,15 @@ dbutils.widgets.text("deploy_spec", "{}")
 dbutils.widgets.text("deployment_id", "-1")
 dbutils.widgets.text("catalog", "main")
 dbutils.widgets.text("schema", "default")
+# Deploy-time defaults supplied by the bundle (var.*). The form can override experiment and the
+# endpoint's serverless policy per deployment; when it leaves them blank, these are used. The
+# tag widgets are applied to every serving endpoint this job creates (matching the job's tags).
+dbutils.widgets.text("experiment", "")             # default MLflow experiment path
+dbutils.widgets.text("serverless_policy", "")      # default endpoint budget/usage policy id
+dbutils.widgets.text("application", "mlops_model_deployer")
+dbutils.widgets.text("cost_center", "")
+dbutils.widgets.text("team", "")
+dbutils.widgets.text("environment", "")            # target name (dev/qa/prod), for the env tag
 # Lakebase Postgres coordinates for the app-facing store (status + lifecycle tables).
 # Supplied by the bundle (var.pg_*) so nothing deployment-specific is hardcoded here.
 dbutils.widgets.text("pg_host", "")            # endpoint host
@@ -56,10 +65,22 @@ dbutils.widgets.text("app_sp", "")             # app service-principal client id
 
 CATALOG = dbutils.widgets.get("catalog")
 SCHEMA = dbutils.widgets.get("schema")
+# Deploy-time defaults (bundle variables). A deployment's form values take precedence; these are
+# the fallbacks and the standard endpoint tag set.
+EXPERIMENT_DEFAULT = dbutils.widgets.get("experiment").strip()
+SERVERLESS_POLICY_DEFAULT = dbutils.widgets.get("serverless_policy").strip()
+APPLICATION = dbutils.widgets.get("application").strip() or "mlops_model_deployer"
+COST_CENTER = dbutils.widgets.get("cost_center").strip()
+TEAM = dbutils.widgets.get("team").strip()
+ENVIRONMENT = dbutils.widgets.get("environment").strip()
 # Catalog/schema are the UC location where MODELS are registered (unchanged). The app's status +
 # lifecycle rows now live in Lakebase Postgres, not Delta.
 spec = json.loads(dbutils.widgets.get("deploy_spec"))
 deployment_id = int(dbutils.widgets.get("deployment_id"))
+# Resolve deploy-time settings: the form value wins, else the bundle default (var.experiment /
+# var.budget_policy_id). Recorded on the status row and used by the wrapper/deployer stages.
+EXPERIMENT_RESOLVED = (spec.get("experiment_name") or "").strip() or EXPERIMENT_DEFAULT
+POLICY_RESOLVED = (spec.get("serverless_usage_policy") or "").strip() or SERVERLESS_POLICY_DEFAULT
 try:
     run_id = str(dbutils.notebook.entry_point.getDbutils().notebook().getContext().jobId().get())
 except Exception:
@@ -325,8 +346,8 @@ endpoint_name = sanitize_endpoint(spec.get("endpoint_name") or f"{uc_model}_endp
 merge_status(
     model_name=spec.get("name"), description=spec.get("description"),
     uc_catalog=uc.get("catalog"), uc_schema=uc.get("schema"), uc_model=uc_model, uc_full_name=uc_full,
-    experiment_name=spec.get("experiment_name"), eval_dataset=spec.get("eval_dataset"),
-    serverless_usage_policy=spec.get("serverless_usage_policy"),
+    experiment_name=EXPERIMENT_RESOLVED, eval_dataset=spec.get("eval_dataset"),
+    serverless_usage_policy=POLICY_RESOLVED,
     tags=json.dumps(spec.get("tags", {})),
     compute_type=compute.get("compute_type"), gpu_type=compute.get("gpu_type"),
     compute_size=compute.get("size"), scale_to_zero=bool(compute.get("scale_to_zero", True)),
@@ -412,9 +433,9 @@ def load_model_object(local_path):
 # COMMAND ----------
 # ---- STAGE 1: Wrapper — wrap + register each variant ------------------------
 mlflow.set_registry_uri("databricks-uc")
-if spec.get("experiment_name"):
+if EXPERIMENT_RESOLVED:
     try:
-        mlflow.set_experiment(spec["experiment_name"])
+        mlflow.set_experiment(EXPERIMENT_RESOLVED)
     except Exception as e:
         print(f"set_experiment warning: {e}")
 
@@ -545,15 +566,25 @@ try:
     if total != 100 and routes:
         routes[0].traffic_percentage += (100 - total)
 
-    tags = [EndpointTag(key="application", value="mlops_model_deployer"),
-            EndpointTag(key="deployed_by", value=str(spec.get("deployed_by", "")))]
+    # Standard tag set (from the bundle variables) + per-deployment form tags. environment/
+    # cost_center/team come from the deploy-time config so endpoints match the job's chargeback.
+    # Build as a key->value dict (last write wins) so a form tag cleanly OVERRIDES a standard tag
+    # of the same name rather than producing a duplicate-key EndpointTag the API would reject.
+    tag_map = {"application": APPLICATION, "deployed_by": str(spec.get("deployed_by", ""))}
+    if COST_CENTER:
+        tag_map["cost_center"] = COST_CENTER
+    if TEAM:
+        tag_map["team"] = TEAM
+    if ENVIRONMENT:
+        tag_map["environment"] = ENVIRONMENT
     if compute.get("gpu_type"):
-        tags.append(EndpointTag(key="gpu_type", value=str(compute.get("gpu_type"))))
+        tag_map["gpu_type"] = str(compute.get("gpu_type"))
     for k, val in (spec.get("tags", {}) or {}).items():
-        tags.append(EndpointTag(key=str(k), value=str(val)))
+        tag_map[str(k)] = str(val)
+    tags = [EndpointTag(key=k, value=v) for k, v in tag_map.items()]
     # Endpoint tags ARE synced on update (via the tags API, below). budget_policy_id + description
     # remain create-time only — the serving config-update API can't change them post-create.
-    budget_policy_id = (spec.get("serverless_usage_policy") or "").strip() or None
+    budget_policy_id = POLICY_RESOLVED or None
     description = spec.get("description") or None
 
     w = WorkspaceClient()

@@ -4,12 +4,14 @@ resources:
       name: mlops_deploy_model_job
       max_concurrent_runs: 5
 
-      # Serverless usage policy + tags for cost chargeback of the deploy job.
+      # Serverless usage policy + tags for cost chargeback of the deploy job. The same policy and
+      # tag set are propagated to every serving endpoint via base_parameters (below).
       budget_policy_id: ${var.budget_policy_id}
       tags:
-        application: mlops_model_deployer
+        application: ${var.application}
         cost_center: ${var.cost_center}
         team: ${var.team}
+        environment: ${bundle.target}
 
       tasks:
         - task_key: deploy_model
@@ -23,10 +25,20 @@ resources:
               deployment_id: "-1"
               catalog: ${var.catalog}
               schema: ${var.schema}
-              # Lakebase Postgres coordinates for the app-facing status/lifecycle store.
+              # Default MLflow experiment (the form can override per deployment).
+              experiment: ${var.experiment}
+              # Default serverless usage policy + standard tags for the serving endpoints this
+              # job creates — same policy/tags as the job itself, so all spend rolls up together.
+              serverless_policy: ${var.budget_policy_id}
+              application: ${var.application}
+              cost_center: ${var.cost_center}
+              team: ${var.team}
+              environment: ${bundle.target}
+              # Lakebase Postgres coordinates for the app-facing status/lifecycle store. The
+              # endpoint path is composed from the project name so it's set in one place.
               pg_host: ${var.pg_host}
               pg_database: ${var.pg_database}
-              pg_endpoint: ${var.pg_endpoint}
+              pg_endpoint: projects/${var.lakebase_project}/branches/${var.lakebase_branch_name}/endpoints/${var.lakebase_endpoint_name}
               pg_schema: ${var.pg_schema}
               app_sp: ${var.app_sp}
 

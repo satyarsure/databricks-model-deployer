@@ -62,9 +62,11 @@ const deploySpecSchema = z.object({
   artifacts: z.array(artifactSchema).min(1),
   input_schema: z.array(fieldSchema).default([]),
   output_schema: z.array(fieldSchema).min(1),
-  experiment_name: z.string().min(1),
+  // Optional: when blank, the deploy job falls back to the bundle defaults (var.experiment /
+  // var.budget_policy_id) configured for the environment.
+  experiment_name: z.string().optional().default(''),
   eval_dataset: z.string().optional().default(''),
-  serverless_usage_policy: z.string().min(1),
+  serverless_usage_policy: z.string().optional().default(''),
   tags: z.record(z.string(), z.any()).default({}),
   // Optional serving-endpoint access control, grouped by permission level. Each entry is a
   // principal: an email (user), a 36-char UUID (service principal), or a name (group). The UI

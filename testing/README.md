@@ -47,6 +47,13 @@ path, an A/B traffic split, and two failure paths — every stage of
 > **Input / Output schema** are entered as **JSON strings** — paste the JSON blocks verbatim.
 > **Tags** is a JSON object. Every feature type is `double`; classifier outputs use `long`.
 >
+> **Experiment name** and **Serverless usage policy** are now **optional overrides** — leave either
+> blank to use the environment's configured default (`var.experiment` / `var.budget_policy_id`). The
+> `<experiment>` / `<budget-policy-id>` values in the tables below are only needed if you want to
+> override for that test; otherwise leave them blank. The endpoint always carries the standard
+> chargeback tags (`application` / `cost_center` / `team` / `environment`) from the deploy config,
+> and any form **Tags** are merged on top (form values win on key collisions).
+>
 > **Evaluation dataset** is **optional** — leave it blank to skip evaluation. When provided, it's a
 > CSV/Parquet path whose columns are the model's features **plus a target column named exactly like
 > the output-schema field** (e.g. `price`, `prediction`, `churn`, `risk_class`). With that target

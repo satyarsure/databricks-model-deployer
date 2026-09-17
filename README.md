@@ -105,12 +105,25 @@ cp app/values.local.example.yml        app/values.local.yml
 # cp governance/values.local.example.yml governance/values.local.yml
 ```
 
-- **deploy-job** — `catalog` / `schema` (UC, for models + artifacts), `budget_policy_id`, cost tags,
-  and the Lakebase coordinates it writes to: `pg_host`, `pg_database`, `pg_endpoint`, `pg_schema`,
-  and `app_sp` (the app's service-principal client id it grants `SELECT, INSERT`).
-- **app** — `app_name`, `job_id` (the deploy job), and `lakebase_branch` / `lakebase_database`
-  (the Lakebase resources it reads from). The app declares a `postgres` resource (not a warehouse);
-  the Apps platform injects `PGHOST`/`PGDATABASE`/`PGUSER`/… and `LAKEBASE_ENDPOINT`.
+**Everything deployment-specific is a bundle variable** — set entirely under `variables:` in
+`values.local.yml`, including the deploy path, MLflow experiment, chargeback tags, and serverless
+policy. The Lakebase resource paths are composed from the project **name**, so you set it once.
+
+- **deploy-job** — `root_path` (deploy path), `catalog` / `schema` (UC, for models + artifacts),
+  `experiment` (deploy-time MLflow default), `budget_policy_id` (one serverless usage policy for the
+  job, the app, **and** every serving endpoint), the chargeback tags `application` / `cost_center` /
+  `team` (an `environment` tag is added automatically from the target), `lakebase_project` (the
+  branch/endpoint paths are composed from it), `pg_host` (the endpoint host — not derivable), and
+  `app_sp` (the app's service-principal client id it grants `SELECT, INSERT`). `pg_database`,
+  `pg_schema`, `lakebase_branch_name`, `lakebase_endpoint_name` have sensible defaults.
+- **app** — `root_path`, `app_name`, `job_id` (the deploy job), `budget_policy_id` (same policy —
+  Databricks Apps take no custom tags, so this is their cost-attribution handle), and
+  `lakebase_project` (branch/database paths composed from it). The app declares a `postgres` resource
+  (not a warehouse); the Apps platform injects `PGHOST`/`PGDATABASE`/`PGUSER`/… and `LAKEBASE_ENDPOINT`.
+
+The **Experiment** and **Serverless usage policy** are also Deploy-form fields, but **optional
+overrides** — left blank, a deployment uses the environment's configured `experiment` /
+`budget_policy_id`.
 
 ## Deploy
 
@@ -149,12 +162,19 @@ databricks apps deploy <app-name> \
 
 ## Chargeback
 
-- **Serving endpoint** — the form's *Serverless usage policy* (a budget policy ID) becomes the
-  endpoint `budget_policy_id` at create time; the *Description* and *Tags* are applied at creation.
-  **Tags are re-synced on every new-version/A/B update** (via the tags API); `budget_policy_id` and
-  `description` are **create-time only** (no serving API updates them post-create).
-- **Deploy job** — carries its own `budget_policy_id` + tags (configurable via `deploy-job` bundle
-  variables) so the deployment compute is attributed.
+One serverless usage policy (`budget_policy_id`) and one tag set (`application` / `cost_center` /
+`team` / `environment`) are configured once per environment and applied everywhere Model Deployer
+spends serverless compute:
+
+- **Serving endpoint** — gets `budget_policy_id` (the form's *Serverless usage policy* if set, else
+  the environment default) at create time, plus the standard tag set **and** any per-deployment
+  *Tags* from the form (form tags override the standard set on key collisions). **Tags are re-synced
+  on every new-version/A/B update** (via the tags API); `budget_policy_id` and `description` are
+  **create-time only** (no serving API updates them post-create).
+- **Deploy job** — carries the same `budget_policy_id` + tag set (via `deploy-job` bundle variables)
+  so the deployment compute is attributed.
+- **App** — carries the same `budget_policy_id` (Databricks Apps don't support custom tags via DABs,
+  so the policy is the app's cost-attribution handle).
 
 ## Tags / metadata
 

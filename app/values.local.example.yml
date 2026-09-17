@@ -1,33 +1,36 @@
 # Copy to values.local.yml (gitignored) and fill in your deployment's real values.
 # Merged into databricks.yml via the `include` glob at deploy time.
 #
-# One block per environment target (dev / qa / prod) — keep only the ones you use, and deploy
-# each with `-t <env> --profile <env>`. The workspace HOST comes from the CLI --profile, not here.
-# `job_id` is that environment's deploy-job id. lakebase_branch/lakebase_database are the Lakebase
-# resource paths the app reads from (get them via `databricks postgres list-branches/list-databases`).
-# For a single environment, keep just the `dev` block.
+# EVERYTHING deployment-specific is a variable — one block per environment target
+# (dev / qa / prod). Keep only the ones you use, and deploy each with `-t <env> --profile <env>`.
+# The workspace HOST comes from the CLI --profile; everything else (including the deploy path) is
+# a variable here. For a single environment, keep just the `dev` block.
+#
+# `job_id` is that environment's deploy-job id (from `databricks jobs list`). Set `lakebase_project`
+# to the SAME project name as the deploy job — the branch/database paths are composed from it.
+# `budget_policy_id` is the SAME serverless usage policy as the deploy job (apps take no tags, so
+# this is the app's cost-attribution handle).
 targets:
   dev:
-    workspace:
+    variables:
       root_path: /Workspace/Users/<you>@example.com/model-deployer-dev/app
-    variables:
       app_name: <dev-app-name>
-      lakebase_branch: projects/<dev-project>/branches/production
-      lakebase_database: projects/<dev-project>/branches/production/databases/databricks-postgres
       job_id: <dev-deploy-job-id>
+      budget_policy_id: <dev-serverless-usage-policy-id>
+      lakebase_project: <dev-lakebase-project>
+      # lakebase_branch_name: production          # defaults shown; override only if non-standard
+      # lakebase_database_name: databricks-postgres   # use the exact path from `postgres list-databases`
   qa:
-    workspace:
+    variables:
       root_path: /Workspace/Shared/model-deployer-qa/app
-    variables:
       app_name: <qa-app-name>
-      lakebase_branch: projects/<qa-project>/branches/production
-      lakebase_database: projects/<qa-project>/branches/production/databases/databricks-postgres
       job_id: <qa-deploy-job-id>
+      budget_policy_id: <qa-serverless-usage-policy-id>
+      lakebase_project: <qa-lakebase-project>
   prod:
-    workspace:
-      root_path: /Workspace/Shared/model-deployer-prod/app
     variables:
+      root_path: /Workspace/Shared/model-deployer-prod/app
       app_name: <prod-app-name>
-      lakebase_branch: projects/<prod-project>/branches/production
-      lakebase_database: projects/<prod-project>/branches/production/databases/databricks-postgres
       job_id: <prod-deploy-job-id>
+      budget_policy_id: <prod-serverless-usage-policy-id>
+      lakebase_project: <prod-lakebase-project>

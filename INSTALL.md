@@ -62,28 +62,39 @@ targets:
   prod: { mode: production }
 ```
 
-**2. Put per-environment values** in the gitignored `values.local.yml` (one block per target). Deploy job:
+**2. Put per-environment values** in the gitignored `values.local.yml` (one block per target).
+**Everything deployment-specific is a bundle variable** — including the deploy path, the MLflow
+experiment, chargeback tags, and the serverless usage policy — so the whole per-environment config
+lives under `variables:`. The Lakebase resource paths are composed from `lakebase_project`, so you
+set the project **name** once (not full paths). Deploy job:
 
 ```yaml
 # deploy-job/values.local.yml
 targets:
   dev:
-    workspace: { root_path: /Workspace/Users/you@client.com/model-deployer-dev/deploy-job }
     variables:
+      root_path: /Workspace/Users/you@client.com/model-deployer-dev/deploy-job
       catalog: rnd_dev
       schema: model_deployer
-      budget_policy_id: <dev-policy>
+      experiment: /Users/you@client.com/experiments/model_deployer_dev  # deploy-time default
+      budget_policy_id: <dev-policy>     # applied to the job, the app, AND serving endpoints
+      application: mlops_model_deployer  # chargeback tags → job + every serving endpoint
       cost_center: cc
       team: mlops
-      pg_host: <dev-endpoint>.database.<region>.azuredatabricks.net
-      pg_database: databricks_postgres
-      pg_endpoint: projects/<dev-lb-project>/branches/production/endpoints/primary
-      pg_schema: model_deployer
+      lakebase_project: <dev-lb-project> # branch/endpoint paths are composed from this name
+      pg_host: <dev-endpoint>.database.<region>.azuredatabricks.net  # not derivable; from list-endpoints
+      # pg_database / pg_schema / lakebase_branch_name / lakebase_endpoint_name have sane defaults
       app_sp: <dev-app-sp-client-id>     # fill after the app is deployed (step 6c)
   # qa: / prod: mirror this with their own values
 ```
-The app bundle's `values.local.yml` mirrors this with `app_name`, `job_id`, `lakebase_branch`, and
-`lakebase_database` per target (each env's `job_id` comes from that env's deploy-job deploy — step 5).
+The app bundle's `values.local.yml` mirrors this with `root_path`, `app_name`, `job_id`,
+`budget_policy_id` (same policy — apps take no custom tags, so this is their cost-attribution
+handle), and `lakebase_project` per target (each env's `job_id` comes from that env's deploy-job
+deploy — step 5). The `environment` tag is added automatically from the target name (`${bundle.target}`).
+
+> **Experiment & serverless policy are also form fields** — but now **optional overrides**. Left
+> blank in the Deploy form, a deployment uses the environment's configured `experiment` /
+> `budget_policy_id`. Fill them in the form only to override for a single deployment.
 
 **3. One CLI profile per environment** (each is usually a different workspace = different host):
 
@@ -230,20 +241,21 @@ Edit `deploy-job/values.local.yml` (see the Environments section for the full mu
 ```yaml
 targets:
   dev:
-    workspace:
-      root_path: <ROOT_PATH>/deploy-job
     variables:
+      root_path: <ROOT_PATH>/deploy-job
       catalog: <CATALOG>
       schema: <SCHEMA>
-      budget_policy_id: <BUDGET_POLICY_ID>
+      experiment: <EXPERIMENT_PATH>       # deploy-time default MLflow experiment
+      budget_policy_id: <BUDGET_POLICY_ID>  # job + app + serving endpoints
+      application: mlops_model_deployer   # chargeback tags
       cost_center: <your_cost_center>
       team: <your_team>
-      pg_host: <PG_HOST>
-      pg_database: databricks_postgres
-      pg_endpoint: <LB_ENDPOINT>
-      pg_schema: <PG_SCHEMA>
+      lakebase_project: <LB_PROJECT>      # endpoint/branch paths composed from this
+      pg_host: <PG_HOST>                  # from `postgres list-endpoints` (status.hosts.host)
       app_sp: ""            # leave blank for now; fill with <APP_SP_ID> after step 6c, then redeploy
 ```
+(`pg_database`, `pg_schema`, `lakebase_branch_name` (`production`), and `lakebase_endpoint_name`
+(`primary`) default sensibly — set them only if your Lakebase names differ.)
 Deploy and capture the job id:
 ```bash
 cd deploy-job
@@ -269,16 +281,16 @@ cp app/values.local.example.yml app/values.local.yml
 ```yaml
 targets:
   dev:
-    workspace:
-      root_path: <ROOT_PATH>/app
     variables:
+      root_path: <ROOT_PATH>/app
       app_name: <APP_NAME>
       job_id: <JOB_ID>                 # from step 5
-      lakebase_branch: <LB_BRANCH>
-      lakebase_database: <LB_DATABASE>
+      budget_policy_id: <BUDGET_POLICY_ID>  # same policy as the deploy job
+      lakebase_project: <LB_PROJECT>   # same project name as the deploy job
+      # lakebase_database_name: databricks-postgres  # override only if your DB path segment differs
 ```
 (No SQL warehouse and no type-generation sample tables — the app queries Lakebase via Express routes,
-not `config/queries`.)
+not `config/queries`. The Lakebase branch/database paths are composed from `lakebase_project`.)
 
 ### 6b. Create the app (uploads source + creates the app and its service principal + Postgres role)
 ```bash

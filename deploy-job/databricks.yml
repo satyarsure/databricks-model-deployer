@@ -5,36 +5,75 @@ include:
   - resources/*.yml
   - "*.local.yml" # gitignored per-deployment overrides (values.local.yml)
 
+# Every deployment-specific value is a variable below, set per environment in the gitignored
+# values.local.yml. Nothing here (or in resources/) hardcodes a workspace, path, name, policy,
+# or tag — a client fills one values.local.yml block per target and deploys.
 variables:
+  # ---- Deploy target -------------------------------------------------------
+  root_path:
+    description: Workspace path this bundle deploys to (maps to workspace.root_path). Set per target.
+    default: ""
+
+  # ---- Unity Catalog (where models are registered + artifacts volume) ------
   catalog:
-    description: UC catalog holding the status/lifecycle tables and artifacts volume
+    description: UC catalog holding the registered models and artifacts volume
     default: main
   schema:
-    description: UC schema holding the status/lifecycle tables and artifacts volume
+    description: UC schema holding the registered models and artifacts volume
     default: default
-  budget_policy_id:
-    description: Serverless budget (usage) policy id applied to the deploy job for chargeback
+
+  # ---- MLflow --------------------------------------------------------------
+  experiment:
+    description: >-
+      Default MLflow experiment path used at deploy time. A deployment can still override it in
+      the form; when the form leaves it blank, this value is used.
     default: ""
+
+  # ---- Cost / chargeback ---------------------------------------------------
+  # One serverless usage (budget) policy for all Model Deployer serverless spend: it is applied to
+  # the deploy JOB's compute (below), the APP (app/databricks.yml), and — as the default — every
+  # serving endpoint a deployment creates (a deployment can override the endpoint policy in the form).
+  budget_policy_id:
+    description: Serverless usage (budget) policy id — applied to the deploy job, the app, and serving endpoints
+    default: ""
+  # Tag set applied to the job and to every serving endpoint (environment comes from ${bundle.target}).
+  application:
+    description: application tag
+    default: mlops_model_deployer
   cost_center:
     default: mlops
   team:
     default: mlops
-  # Lakebase Postgres (the app's read store). The notebook writes status + lifecycle here.
+
+  # ---- Lakebase Postgres (the app's read store) ----------------------------
+  # The notebook writes status + lifecycle here. The project NAME drives every Lakebase resource
+  # path (endpoint/branch), composed in resources/deploy_model.job.yml — set it once here.
+  lakebase_project:
+    description: Lakebase project name (e.g. rnd-model-deployer-dev)
+    default: ""
+  lakebase_branch_name:
+    description: Lakebase branch name
+    default: production
+  lakebase_endpoint_name:
+    description: Lakebase read-write endpoint name
+    default: primary
   pg_host:
-    description: Lakebase endpoint host (status.hosts.host)
+    description: Lakebase endpoint host (status.hosts.host — not derivable from the project name)
     default: ""
   pg_database:
-    description: Postgres database name
+    description: Postgres database name (connection dbname)
     default: databricks_postgres
-  pg_endpoint:
-    description: Lakebase endpoint resource path (projects/<p>/branches/<b>/endpoints/<e>) — used to mint the DB credential
-    default: ""
   pg_schema:
     description: Postgres schema the notebook owns for the app tables
     default: model_deployer
   app_sp:
-    description: App service-principal client id to grant SELECT on the schema (leave blank until the app is deployed)
+    description: App service-principal client id to grant SELECT/INSERT (leave blank until the app is deployed)
     default: ""
+
+# The deploy path is a variable too, so the whole per-environment config lives under `variables:`
+# in values.local.yml. (mode:development still prefixes resource NAMES with [dev <you>].)
+workspace:
+  root_path: ${var.root_path}
 
 targets:
   # One target per environment. The target NAMES live here (committed); the per-environment

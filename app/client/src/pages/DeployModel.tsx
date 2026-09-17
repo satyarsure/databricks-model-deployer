@@ -410,10 +410,10 @@ export function DeployModel({
     if (!inCheck.ok) return `Input schema ${inCheck.error}.`;
     const outCheck = parseSchema(outputSchemaText, true);
     if (!outCheck.ok) return `Output schema ${outCheck.error}.`;
-    if (!experimentName.trim()) return 'Experiment name is required.';
+    // Experiment and serverless usage policy are OPTIONAL overrides — when blank, the deploy job
+    // uses the environment's configured defaults (var.experiment / var.budget_policy_id).
     if (!ucCatalog.trim() || !ucSchema.trim() || !ucModel.trim())
       return 'UC catalog, schema, and model are all required.';
-    if (!usagePolicy.trim()) return 'Serverless usage policy is required.';
     try {
       const parsed = JSON.parse(tagsText || '{}');
       if (typeof parsed !== 'object' || Array.isArray(parsed))
@@ -700,10 +700,13 @@ export function DeployModel({
           />
         </Section>
 
-        <Section title="Experiment name">
+        <Section
+          title="Experiment name"
+          hint="Optional — leave blank to use the environment's configured default MLflow experiment."
+        >
           <input
             className={inputCls + lockedCls}
-            placeholder="/Users/you@company.com/experiments/my_experiment"
+            placeholder="(optional) /Users/you@company.com/experiments/my_experiment"
             value={experimentName}
             disabled={isNewVersion}
             onChange={(e) => setExperimentName(e.target.value)}
@@ -762,11 +765,11 @@ export function DeployModel({
 
         <Section
           title="Serverless usage policy"
-          hint="Budget policy ID applied to the serving endpoint for cost chargeback (set at endpoint creation). Find it under Settings › Serverless usage policies."
+          hint="Optional — budget policy ID applied to the serving endpoint (set at endpoint creation). Leave blank to use the environment's configured default policy. Find IDs under Settings › Serverless usage policies."
         >
           <input
             className={inputCls}
-            placeholder="budget policy ID (e.g. 1a2b3c4d-…)"
+            placeholder="(optional) budget policy ID (e.g. 1a2b3c4d-…)"
             value={usagePolicy}
             onChange={(e) => setUsagePolicy(e.target.value)}
           />
