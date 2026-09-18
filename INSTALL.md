@@ -78,9 +78,11 @@ targets:
       schema: model_deployer
       experiment: /Users/you@client.com/experiments/model_deployer_dev  # deploy-time default
       budget_policy_id: <dev-policy>     # applied to the job, the app, AND serving endpoints
-      application: mlops_model_deployer  # chargeback tags → job + every serving endpoint
-      cost_center: cc
-      team: mlops
+      resource_tags:                     # free-form map → job.tags + every serving endpoint
+        application: mlops_model_deployer
+        cost_center: cc
+        team: mlops
+        environment: dev
       lakebase_project: <dev-lb-project> # branch/endpoint paths are composed from this name
       pg_host: <dev-endpoint>.database.<region>.azuredatabricks.net  # not derivable; from list-endpoints
       # pg_database / pg_schema / lakebase_branch_name / lakebase_endpoint_name have sane defaults
@@ -209,7 +211,8 @@ separate PAT profile for deploys. **Never rely on a default profile — always p
 
 ```bash
 databricks postgres create-project <LB_PROJECT> \
-  --json '{"spec": {"display_name": "<LB_PROJECT>"}}' --profile <PROFILE>
+  --json '{"spec": {"display_name": "<LB_PROJECT>", "budget_policy_id": "<BUDGET_POLICY_ID>", "custom_tags": [{"key":"application","value":"mlops_model_deployer"},{"key":"cost_center","value":"<cost_center>"}]}}' \
+  --profile <PROFILE>
 
 # Discover the resource paths + endpoint host you'll need:
 databricks postgres list-branches   projects/<LB_PROJECT> --profile <PROFILE>          # -> <LB_BRANCH> (production)
@@ -247,9 +250,11 @@ targets:
       schema: <SCHEMA>
       experiment: <EXPERIMENT_PATH>       # deploy-time default MLflow experiment
       budget_policy_id: <BUDGET_POLICY_ID>  # job + app + serving endpoints
-      application: mlops_model_deployer   # chargeback tags
-      cost_center: <your_cost_center>
-      team: <your_team>
+      resource_tags:                      # free-form map → job.tags + every serving endpoint
+        application: mlops_model_deployer
+        cost_center: <your_cost_center>
+        team: <your_team>
+        environment: dev
       lakebase_project: <LB_PROJECT>      # endpoint/branch paths composed from this
       pg_host: <PG_HOST>                  # from `postgres list-endpoints` (status.hosts.host)
       app_sp: ""            # leave blank for now; fill with <APP_SP_ID> after step 6c, then redeploy

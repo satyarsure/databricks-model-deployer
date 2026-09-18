@@ -4,14 +4,11 @@ resources:
       name: mlops_deploy_model_job
       max_concurrent_runs: 5
 
-      # Serverless usage policy + tags for cost chargeback of the deploy job. The same policy and
-      # tag set are propagated to every serving endpoint via base_parameters (below).
+      # Serverless usage policy + the full governance/chargeback tag map. The notebook reads these
+      # same job tags at runtime (via the SDK) and applies them to every serving endpoint it creates,
+      # so the tag set is defined in exactly one place (var.resource_tags).
       budget_policy_id: ${var.budget_policy_id}
-      tags:
-        application: ${var.application}
-        cost_center: ${var.cost_center}
-        team: ${var.team}
-        environment: ${bundle.target}
+      tags: ${var.resource_tags}
 
       tasks:
         - task_key: deploy_model
@@ -27,13 +24,10 @@ resources:
               schema: ${var.schema}
               # Default MLflow experiment (the form can override per deployment).
               experiment: ${var.experiment}
-              # Default serverless usage policy + standard tags for the serving endpoints this
-              # job creates — same policy/tags as the job itself, so all spend rolls up together.
+              # Default serverless usage policy for the serving endpoints this job creates — same
+              # policy as the job itself, so all spend rolls up together. (The endpoints' tags are
+              # read from the job's own tags at runtime, so they aren't passed here.)
               serverless_policy: ${var.budget_policy_id}
-              application: ${var.application}
-              cost_center: ${var.cost_center}
-              team: ${var.team}
-              environment: ${bundle.target}
               # Lakebase Postgres coordinates for the app-facing status/lifecycle store. The
               # endpoint path is composed from the project name so it's set in one place.
               pg_host: ${var.pg_host}

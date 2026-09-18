@@ -111,11 +111,12 @@ policy. The Lakebase resource paths are composed from the project **name**, so y
 
 - **deploy-job** — `root_path` (deploy path), `catalog` / `schema` (UC, for models + artifacts),
   `experiment` (deploy-time MLflow default), `budget_policy_id` (one serverless usage policy for the
-  job, the app, **and** every serving endpoint), the chargeback tags `application` / `cost_center` /
-  `team` (an `environment` tag is added automatically from the target), `lakebase_project` (the
-  branch/endpoint paths are composed from it), `pg_host` (the endpoint host — not derivable), and
-  `app_sp` (the app's service-principal client id it grants `SELECT, INSERT`). `pg_database`,
-  `pg_schema`, `lakebase_branch_name`, `lakebase_endpoint_name` have sensible defaults.
+  job, the app, **and** every serving endpoint), `resource_tags` (a free-form **map** of governance/
+  chargeback tags with any keys — applied to the deploy job and, via the notebook, to every serving
+  endpoint), `lakebase_project` (the branch/endpoint paths are composed from it), `pg_host` (the
+  endpoint host — not derivable), and `app_sp` (the app's service-principal client id it grants
+  `SELECT, INSERT`). `pg_database`, `pg_schema`, `lakebase_branch_name`, `lakebase_endpoint_name`
+  have sensible defaults.
 - **app** — `root_path`, `app_name`, `job_id` (the deploy job), `budget_policy_id` (same policy —
   Databricks Apps take no custom tags, so this is their cost-attribution handle), and
   `lakebase_project` (branch/database paths composed from it). The app declares a `postgres` resource
@@ -162,19 +163,20 @@ databricks apps deploy <app-name> \
 
 ## Chargeback
 
-One serverless usage policy (`budget_policy_id`) and one tag set (`application` / `cost_center` /
-`team` / `environment`) are configured once per environment and applied everywhere Model Deployer
-spends serverless compute:
+One serverless usage policy (`budget_policy_id`) and one free-form tag map (`resource_tags`) are
+configured once per environment and applied everywhere Model Deployer spends serverless compute:
 
+- **Deploy job** — carries `budget_policy_id` and the full `resource_tags` map as `job.tags`
+  (defined in one place; the notebook reads them back from the job at runtime).
 - **Serving endpoint** — gets `budget_policy_id` (the form's *Serverless usage policy* if set, else
-  the environment default) at create time, plus the standard tag set **and** any per-deployment
-  *Tags* from the form (form tags override the standard set on key collisions). **Tags are re-synced
-  on every new-version/A/B update** (via the tags API); `budget_policy_id` and `description` are
+  the environment default) at create time, plus the job's `resource_tags` **and** any per-deployment
+  *Tags* from the form (form tags win on key collisions). Tags are applied via the tags API (non-fatal)
+  and **re-synced on every new-version/A/B update**; `budget_policy_id` and `description` are
   **create-time only** (no serving API updates them post-create).
-- **Deploy job** — carries the same `budget_policy_id` + tag set (via `deploy-job` bundle variables)
-  so the deployment compute is attributed.
 - **App** — carries the same `budget_policy_id` (Databricks Apps don't support custom tags via DABs,
   so the policy is the app's cost-attribution handle).
+- **Lakebase project** — tag it at create time with the project's own `custom_tags` and
+  `budget_policy_id` (see INSTALL.md § provision) — the bundle doesn't own the project.
 
 ## Tags / metadata
 

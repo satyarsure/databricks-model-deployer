@@ -22,10 +22,14 @@ targets:
       experiment: /Users/<you>@example.com/experiments/model_deployer_dev
       # Serverless usage policy — applied to the job, the app, AND serving endpoints
       budget_policy_id: <dev-serverless-usage-policy-id>
-      # Chargeback tags (applied to the job + every serving endpoint; environment tag is automatic)
-      application: mlops_model_deployer
-      cost_center: <your_cost_center>
-      team: <your_team>
+      # Free-form governance/chargeback tags (any keys) — applied to the deploy job AND, via the
+      # notebook, to every serving endpoint. Apps take no custom tags (policy only); tag the
+      # Lakebase project at create time (custom_tags — see INSTALL.md).
+      resource_tags:
+        application: mlops_model_deployer
+        cost_center: <your_cost_center>
+        team: <your_team>
+        environment: dev
       # Lakebase (the app's read store) — set the project name; paths are composed from it
       lakebase_project: <dev-lakebase-project>
       # lakebase_branch_name: production   # defaults shown; override only if non-standard
@@ -41,9 +45,11 @@ targets:
       schema: <qa_schema>
       experiment: /Shared/experiments/model_deployer_qa
       budget_policy_id: <qa-serverless-usage-policy-id>
-      application: mlops_model_deployer
-      cost_center: <your_cost_center>
-      team: <your_team>
+      resource_tags:
+        application: mlops_model_deployer
+        cost_center: <your_cost_center>
+        team: <your_team>
+        environment: qa
       lakebase_project: <qa-lakebase-project>
       pg_host: <qa-endpoint>.database.<region>.azuredatabricks.net
       app_sp: <qa-app-sp-client-id>
@@ -54,9 +60,11 @@ targets:
       schema: <prod_schema>
       experiment: /Shared/experiments/model_deployer_prod
       budget_policy_id: <prod-serverless-usage-policy-id>
-      application: mlops_model_deployer
-      cost_center: <your_cost_center>
-      team: <your_team>
+      resource_tags:
+        application: mlops_model_deployer
+        cost_center: <your_cost_center>
+        team: <your_team>
+        environment: prod
       lakebase_project: <prod-lakebase-project>
       pg_host: <prod-endpoint>.database.<region>.azuredatabricks.net
       app_sp: <prod-app-sp-client-id>

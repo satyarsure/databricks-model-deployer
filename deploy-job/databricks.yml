@@ -36,14 +36,16 @@ variables:
   budget_policy_id:
     description: Serverless usage (budget) policy id — applied to the deploy job, the app, and serving endpoints
     default: ""
-  # Tag set applied to the job and to every serving endpoint (environment comes from ${bundle.target}).
-  application:
-    description: application tag
-    default: mlops_model_deployer
-  cost_center:
-    default: mlops
-  team:
-    default: mlops
+  # Free-form governance / chargeback tag set (arbitrary keys). Applied to the deploy JOB (job.tags)
+  # and, via the notebook, to every serving endpoint it creates. Set the full map per environment in
+  # values.local.yml. NOTE: Databricks Apps can't carry custom tags via DABs — the app gets
+  # budget_policy_id only (its cost-attribution handle); the Lakebase project is tagged at create
+  # time (its custom_tags, see INSTALL.md), since the bundle doesn't own it.
+  resource_tags:
+    type: complex
+    description: Map of tag key -> value applied to the deploy job and serving endpoints
+    default:
+      application: mlops_model_deployer
 
   # ---- Lakebase Postgres (the app's read store) ----------------------------
   # The notebook writes status + lifecycle here. The project NAME drives every Lakebase resource

@@ -47,14 +47,11 @@ dbutils.widgets.text("deployment_id", "-1")
 dbutils.widgets.text("catalog", "main")
 dbutils.widgets.text("schema", "default")
 # Deploy-time defaults supplied by the bundle (var.*). The form can override experiment and the
-# endpoint's serverless policy per deployment; when it leaves them blank, these are used. The
-# tag widgets are applied to every serving endpoint this job creates (matching the job's tags).
+# endpoint's serverless policy per deployment; when it leaves them blank, these are used.
+# (Governance/chargeback tags are NOT passed here — the notebook reads them from the job's own
+# tags at runtime; see _job_tags().)
 dbutils.widgets.text("experiment", "")             # default MLflow experiment path
 dbutils.widgets.text("serverless_policy", "")      # default endpoint budget/usage policy id
-dbutils.widgets.text("application", "mlops_model_deployer")
-dbutils.widgets.text("cost_center", "")
-dbutils.widgets.text("team", "")
-dbutils.widgets.text("environment", "")            # target name (dev/qa/prod), for the env tag
 # Lakebase Postgres coordinates for the app-facing store (status + lifecycle tables).
 # Supplied by the bundle (var.pg_*) so nothing deployment-specific is hardcoded here.
 dbutils.widgets.text("pg_host", "")            # endpoint host
@@ -66,13 +63,23 @@ dbutils.widgets.text("app_sp", "")             # app service-principal client id
 CATALOG = dbutils.widgets.get("catalog")
 SCHEMA = dbutils.widgets.get("schema")
 # Deploy-time defaults (bundle variables). A deployment's form values take precedence; these are
-# the fallbacks and the standard endpoint tag set.
+# the fallbacks. Governance/chargeback tags come from the job's own tags (see _job_tags()).
 EXPERIMENT_DEFAULT = dbutils.widgets.get("experiment").strip()
 SERVERLESS_POLICY_DEFAULT = dbutils.widgets.get("serverless_policy").strip()
-APPLICATION = dbutils.widgets.get("application").strip() or "mlops_model_deployer"
-COST_CENTER = dbutils.widgets.get("cost_center").strip()
-TEAM = dbutils.widgets.get("team").strip()
-ENVIRONMENT = dbutils.widgets.get("environment").strip()
+
+def _job_tags():
+    """Governance/chargeback tags = the deploy job's OWN tags (bundle var.resource_tags), read at
+    runtime so the tag set is defined in exactly one place. Applied to serving endpoints. Non-fatal:
+    returns {} if the job id/tags can't be read (endpoints then get only minimal tags)."""
+    try:
+        # Same job-id accessor the notebook uses for run_id (proven to work when run as a job).
+        job_id = dbutils.notebook.entry_point.getDbutils().notebook().getContext().jobId().get()
+        if not job_id:
+            return {}
+        return dict(WorkspaceClient().jobs.get(int(job_id)).settings.tags or {})
+    except Exception as e:
+        print(f"[tags] could not read deploy-job tags (endpoints get minimal tags): {e}")
+        return {}
 # Catalog/schema are the UC location where MODELS are registered (unchanged). The app's status +
 # lifecycle rows now live in Lakebase Postgres, not Delta.
 spec = json.loads(dbutils.widgets.get("deploy_spec"))
@@ -566,22 +573,17 @@ try:
     if total != 100 and routes:
         routes[0].traffic_percentage += (100 - total)
 
-    # Standard tag set (from the bundle variables) + per-deployment form tags. environment/
-    # cost_center/team come from the deploy-time config so endpoints match the job's chargeback.
-    # Build as a key->value dict (last write wins) so a form tag cleanly OVERRIDES a standard tag
-    # of the same name rather than producing a duplicate-key EndpointTag the API would reject.
-    tag_map = {"application": APPLICATION, "deployed_by": str(spec.get("deployed_by", ""))}
-    if COST_CENTER:
-        tag_map["cost_center"] = COST_CENTER
-    if TEAM:
-        tag_map["team"] = TEAM
-    if ENVIRONMENT:
-        tag_map["environment"] = ENVIRONMENT
+    # Governance/chargeback tags come from the deploy JOB's own tags (bundle var.resource_tags),
+    # so the set is defined in one place. Merge order (last write wins, so no duplicate-key
+    # EndpointTag): job tags -> deployed_by/gpu_type -> the deployment's own form tags (form wins).
+    tag_map = dict(_job_tags())
+    tag_map.setdefault("application", "mlops_model_deployer")
+    tag_map["deployed_by"] = str(spec.get("deployed_by", ""))
     if compute.get("gpu_type"):
         tag_map["gpu_type"] = str(compute.get("gpu_type"))
     for k, val in (spec.get("tags", {}) or {}).items():
         tag_map[str(k)] = str(val)
-    tags = [EndpointTag(key=k, value=v) for k, v in tag_map.items()]
+    tags = [EndpointTag(key=str(k), value=str(v)) for k, v in tag_map.items()]
     # Endpoint tags ARE synced on update (via the tags API, below). budget_policy_id + description
     # remain create-time only — the serving config-update API can't change them post-create.
     budget_policy_id = POLICY_RESOLVED or None
@@ -612,7 +614,10 @@ try:
             print(f"[deployer] tag sync warning (non-fatal): {te}")
     except errors.platform.ResourceDoesNotExist:
         print(f"[deployer] creating {endpoint_name} (budget_policy_id={budget_policy_id})")
-        kw = dict(name=endpoint_name, config=config, tags=tags, timeout=timedelta(minutes=60))
+        # budget_policy_id + description are create-time only. Tags are NOT passed to create — they
+        # are applied via the tags API right after (below), so an unusual governance tag key/value
+        # can never fail endpoint creation (tagging is non-fatal, matching the update path).
+        kw = dict(name=endpoint_name, config=config, timeout=timedelta(minutes=60))
         if budget_policy_id:
             kw["budget_policy_id"] = budget_policy_id
         if description:
@@ -627,6 +632,11 @@ try:
                   f"{_dropped}; skipping. Pin a version that supports them (deploy-job/requirements.txt).")
             kw = {k: v for k, v in kw.items() if k in _allowed}
         w.serving_endpoints.create_and_wait(**kw)
+        try:
+            w.serving_endpoints.patch(name=endpoint_name, add_tags=tags)
+            print(f"[deployer] applied {len(tags)} endpoint tags")
+        except Exception as te:
+            print(f"[deployer] endpoint tag apply warning (non-fatal): {te}")
 
     enable_ai_gateway(endpoint_name)
 
