@@ -573,34 +573,36 @@ try:
     if total != 100 and routes:
         routes[0].traffic_percentage += (100 - total)
 
-    # Governance/chargeback tags come from the deploy JOB's own tags (bundle var.resource_tags),
-    # so the set is defined in one place. Merge order (last write wins, so no duplicate-key
-    # EndpointTag): job tags -> deployed_by/gpu_type -> the deployment's own form tags (form wins).
-    tag_map = dict(_job_tags())
-    tag_map.setdefault("application", "mlops_model_deployer")
-    tag_map["deployed_by"] = str(spec.get("deployed_by", ""))
-    if compute.get("gpu_type"):
-        tag_map["gpu_type"] = str(compute.get("gpu_type"))
-    for k, val in (spec.get("tags", {}) or {}).items():
-        tag_map[str(k)] = str(val)
-    # Serving endpoints allow at most 20 tags TOTAL — over that, the tags API rejects the whole
-    # request and the endpoint ends up with NONE. If we're over, keep a prioritized 20: governance
-    # (job) + the deployment's own form tags first, dropping the auto-added deployed_by/gpu_type/
-    # application first. Log what was dropped so it's visible in the run output.
+    # Endpoint tags, assembled in PRIORITY order for the serving endpoint's 20-tag limit (over 20,
+    # the tags API rejects the whole request, so we keep the first 20). Highest priority first, so
+    # the tags that survive are, in order:
+    #   (1) the deployment's UI/form tags (spec.tags) — always populated first,
+    #   (2) the governance / job tags (bundle var.resource_tags),
+    #   (3) the auto-added gpu_type / application / deployed_by.
+    # The first writer of a key wins its value + position, so a UI tag overrides a governance tag of
+    # the same name. Anything beyond 20 is dropped lowest-priority-first, and logged.
+    values, order = {}, []
+    def _tag(k, v):
+        k = str(k)
+        if k not in values:
+            values[k] = str(v)
+            order.append(k)
+    for k, v in (spec.get("tags", {}) or {}).items():   # (1) UI/form tags — highest priority
+        _tag(k, v)
+    for k, v in _job_tags().items():                     # (2) governance / job tags
+        _tag(k, v)
+    if compute.get("gpu_type"):                          # (3) auto-added, lowest priority
+        _tag("gpu_type", compute.get("gpu_type"))
+    _tag("application", "mlops_model_deployer")
+    _tag("deployed_by", spec.get("deployed_by", ""))
+
     MAX_ENDPOINT_TAGS = 20
-    if len(tag_map) > MAX_ENDPOINT_TAGS:
-        # Auto-added tags, listed here in the order we'd PREFER to KEEP them (so the tail — the
-        # first to be dropped — is deployed_by, then gpu_type, then application). Governance + form
-        # tags are never in this list, so they're kept ahead of all three.
-        low_priority = ["application", "gpu_type", "deployed_by"]
-        low_present = [k for k in low_priority if k in tag_map]
-        ordered = [k for k in tag_map if k not in low_present] + low_present
-        kept = ordered[:MAX_ENDPOINT_TAGS]
-        dropped = [k for k in ordered if k not in kept]
-        print(f"[deployer] endpoint tag limit is {MAX_ENDPOINT_TAGS}; have {len(tag_map)} — "
-              f"dropping {len(dropped)} lower-priority tag(s): {dropped}")
-        tag_map = {k: tag_map[k] for k in kept}
-    tags = [EndpointTag(key=str(k), value=str(v)) for k, v in tag_map.items()]
+    if len(order) > MAX_ENDPOINT_TAGS:
+        dropped = order[MAX_ENDPOINT_TAGS:]
+        order = order[:MAX_ENDPOINT_TAGS]
+        print(f"[deployer] endpoint tag limit is {MAX_ENDPOINT_TAGS}; have {len(values)} — "
+              f"UI/form tags prioritized; dropping lowest-priority: {dropped}")
+    tags = [EndpointTag(key=k, value=values[k]) for k in order]
     # Endpoint tags ARE synced on update (via the tags API, below). budget_policy_id + description
     # remain create-time only — the serving config-update API can't change them post-create.
     budget_policy_id = POLICY_RESOLVED or None
