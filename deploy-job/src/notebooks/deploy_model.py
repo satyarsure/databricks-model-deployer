@@ -583,6 +583,23 @@ try:
         tag_map["gpu_type"] = str(compute.get("gpu_type"))
     for k, val in (spec.get("tags", {}) or {}).items():
         tag_map[str(k)] = str(val)
+    # Serving endpoints allow at most 20 tags TOTAL — over that, the tags API rejects the whole
+    # request and the endpoint ends up with NONE. If we're over, keep a prioritized 20: governance
+    # (job) + the deployment's own form tags first, dropping the auto-added deployed_by/gpu_type/
+    # application first. Log what was dropped so it's visible in the run output.
+    MAX_ENDPOINT_TAGS = 20
+    if len(tag_map) > MAX_ENDPOINT_TAGS:
+        # Auto-added tags, listed here in the order we'd PREFER to KEEP them (so the tail — the
+        # first to be dropped — is deployed_by, then gpu_type, then application). Governance + form
+        # tags are never in this list, so they're kept ahead of all three.
+        low_priority = ["application", "gpu_type", "deployed_by"]
+        low_present = [k for k in low_priority if k in tag_map]
+        ordered = [k for k in tag_map if k not in low_present] + low_present
+        kept = ordered[:MAX_ENDPOINT_TAGS]
+        dropped = [k for k in ordered if k not in kept]
+        print(f"[deployer] endpoint tag limit is {MAX_ENDPOINT_TAGS}; have {len(tag_map)} — "
+              f"dropping {len(dropped)} lower-priority tag(s): {dropped}")
+        tag_map = {k: tag_map[k] for k in kept}
     tags = [EndpointTag(key=str(k), value=str(v)) for k, v in tag_map.items()]
     # Endpoint tags ARE synced on update (via the tags API, below). budget_policy_id + description
     # remain create-time only — the serving config-update API can't change them post-create.
