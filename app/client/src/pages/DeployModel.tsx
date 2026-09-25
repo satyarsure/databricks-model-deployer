@@ -1,6 +1,6 @@
 import { useMemo, useState, type ReactNode } from 'react';
 import { Button, Label } from '@databricks/appkit-ui/react';
-import { Plus, Trash2, Save, Info } from 'lucide-react';
+import { Plus, Trash2, Save, Info, Rocket } from 'lucide-react';
 import { useApiQuery } from '../lib/useApiQuery';
 import type { DeploymentRow, PendingDeployment } from '../types';
 
@@ -20,10 +20,12 @@ interface Artifact {
   traffic_percent: number;
 }
 
-interface Prefill {
+// Also used as the shape of a saved draft's `draft_json` (the raw form state).
+export interface Prefill {
   name: string;
   description: string;
   artifacts: Artifact[];
+  contractMode?: 'schema' | 'sample';
   inputSchemaText: string;
   outputSchemaText: string;
   sampleInputText?: string;
@@ -332,18 +334,24 @@ function VersionPicker({
 export function DeployModel({
   prefill,
   abBaseline,
+  draft,
+  draftId,
   onDeployed,
   onCancel,
 }: {
   prefill?: DeploymentRow | null;
   abBaseline?: DeploymentRow | null;
+  draft?: Prefill | null;
+  draftId?: string;
   onDeployed: (pending?: PendingDeployment) => void;
   onCancel: () => void;
 }) {
   const isAb = !!abBaseline;
-  const pf = isAb ? parseAbBaseline(abBaseline!) : parsePrefill(prefill ?? null);
-  // Both "new version" and "A/B test" lock the model identity (name/experiment/UC).
-  const isNewVersion = pf !== null;
+  // A resumed draft supplies the raw form values directly; otherwise derive them from a row.
+  const pf = draft ?? (isAb ? parseAbBaseline(abBaseline!) : parsePrefill(prefill ?? null));
+  // "New version" / "A/B test" lock the model identity (name/experiment/UC). A resumed DRAFT is a
+  // fresh deployment still being edited, so it is NOT locked.
+  const isNewVersion = !draft && pf !== null;
   const lockedCls = isNewVersion ? ' opacity-60 cursor-not-allowed' : '';
 
   // When the UC model is already known (deploying a new version OR an A/B test), a variant
@@ -367,8 +375,11 @@ export function DeployModel({
   // (preferred for text / JSON / tensor models like {"instances": [...]}). The deploy job infers
   // the MLflow signature from the sample, so it matches the model's native serving contract.
   const [contractMode, setContractMode] = useState<'schema' | 'sample'>(
-    pf?.sampleInputText ? 'sample' : 'schema',
+    pf?.contractMode ?? (pf?.sampleInputText ? 'sample' : 'schema'),
   );
+  // The draft this form is editing (if resumed or already saved once) — so Save updates it in place.
+  const [savedDraftId, setSavedDraftId] = useState<string | undefined>(draftId);
+  const [draftMsg, setDraftMsg] = useState('');
   const [sampleInputText, setSampleInputText] = useState(
     pf?.sampleInputText ?? '{\n  "instances": ["example one", "example two"]\n}',
   );
@@ -551,6 +562,43 @@ export function DeployModel({
           }
         : undefined;
       setTimeout(() => onDeployed(pending), 900);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  // Snapshot the current (possibly incomplete) form state as a draft payload (the Prefill shape).
+  function gatherDraft(): Prefill {
+    return {
+      name, description, artifacts, contractMode, inputSchemaText, outputSchemaText,
+      sampleInputText, sampleOutputText, experimentName, evalDataset,
+      ucCatalog, ucSchema, ucModel, usagePolicy, tagsText, permissionsText,
+      computeType, gpuType, size, scaleToZero,
+    };
+  }
+
+  // Save the partially-filled form as a draft (no validation, no deploy). Reusable — subsequent
+  // saves update the same draft (savedDraftId).
+  async function saveDraft() {
+    setError(null);
+    setDraftMsg('');
+    setSubmitting(true);
+    try {
+      const res = await fetch('/api/drafts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          draft_id: savedDraftId,
+          name: name.trim() || 'Untitled draft',
+          draft: gatherDraft(),
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `Save failed (${res.status})`);
+      if (data.draft_id) setSavedDraftId(String(data.draft_id));
+      setDraftMsg('Draft saved — resume it from the Deployed Models tab.');
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -951,6 +999,11 @@ export function DeployModel({
             {error}
           </div>
         )}
+        {draftMsg && (
+          <div className="rounded-md bg-blue-100 p-3 text-sm text-blue-700 dark:bg-blue-950 dark:text-blue-300">
+            {draftMsg}
+          </div>
+        )}
         {ok && (
           <div className="rounded-md bg-green-100 p-3 text-sm text-green-700 dark:bg-green-950 dark:text-green-400">
             {ok}
@@ -961,13 +1014,15 @@ export function DeployModel({
           <Button type="button" variant="outline" onClick={onCancel} disabled={submitting}>
             Cancel
           </Button>
-          <Button type="button" onClick={submit} disabled={submitting} className="gap-2">
+          {/* Save the (possibly incomplete) form as a draft to resume later — no validation, no deploy. */}
+          <Button type="button" variant="outline" onClick={saveDraft} disabled={submitting} className="gap-2">
             <Save className="h-4 w-4" />
-            {submitting
-              ? 'Deploying…'
-              : isNewVersion
-                ? 'Deploy new version'
-                : 'Save & Deploy'}
+            Save draft
+          </Button>
+          {/* Deploy = validate + save + trigger the deploy job. */}
+          <Button type="button" onClick={submit} disabled={submitting} className="gap-2">
+            <Rocket className="h-4 w-4" />
+            {submitting ? 'Deploying…' : isNewVersion ? 'Deploy new version' : 'Deploy'}
           </Button>
         </div>
       </div>

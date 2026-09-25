@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Rocket } from 'lucide-react';
 import { DeployedModels } from './pages/DeployedModels';
-import { DeployModel } from './pages/DeployModel';
+import { DeployModel, type Prefill } from './pages/DeployModel';
 import type { DeploymentRow, PendingDeployment } from './types';
 
 type Tab = 'deployed' | 'deploy';
@@ -52,6 +52,8 @@ export default function App() {
   const [tab, setTab] = useState<Tab>('deployed');
   const [prefill, setPrefill] = useState<DeploymentRow | null>(null);
   const [abBaseline, setAbBaseline] = useState<DeploymentRow | null>(null);
+  // A saved draft the user chose to resume (raw form values + its id, so Save updates it in place).
+  const [resumeDraft, setResumeDraft] = useState<{ draft_id: string; values: Prefill } | null>(null);
   const [pending, setPendingState] = useState<PendingDeployment | null>(() => loadPending());
   const [email, setEmail] = useState('');
 
@@ -123,33 +125,52 @@ export default function App() {
               onDeployNew={() => {
                 setPrefill(null);
                 setAbBaseline(null);
+                setResumeDraft(null);
                 setTab('deploy');
               }}
               onDeployVersion={(row) => {
                 setAbBaseline(null);
+                setResumeDraft(null);
                 setPrefill(row);
                 setTab('deploy');
               }}
               onAbTest={(row) => {
                 setPrefill(null);
+                setResumeDraft(null);
                 setAbBaseline(row);
+                setTab('deploy');
+              }}
+              onResumeDraft={(id, values) => {
+                setPrefill(null);
+                setAbBaseline(null);
+                setResumeDraft({ draft_id: id, values });
                 setTab('deploy');
               }}
             />
           ) : (
             <DeployModel
-              key={abBaseline ? `ab-${abBaseline.deployment_id}` : (prefill?.deployment_id ?? 'new')}
+              key={
+                resumeDraft
+                  ? `draft-${resumeDraft.draft_id}`
+                  : abBaseline
+                    ? `ab-${abBaseline.deployment_id}`
+                    : (prefill?.deployment_id ?? 'new')
+              }
               prefill={prefill}
               abBaseline={abBaseline}
+              draft={resumeDraft?.values ?? null}
+              draftId={resumeDraft?.draft_id}
               onDeployed={(p) => {
                 setPrefill(null);
                 setAbBaseline(null);
+                setResumeDraft(null);
                 setPending(p ?? null);
                 setTab('deployed');
               }}
               onCancel={() => {
                 setPrefill(null);
                 setAbBaseline(null);
+                setResumeDraft(null);
                 setTab('deployed');
               }}
             />

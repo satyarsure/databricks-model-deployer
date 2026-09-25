@@ -328,6 +328,15 @@ def _pg_init():
     """)
     _pg_exec(f'CREATE INDEX IF NOT EXISTS ix_lifecycle_deployment '
              f'ON {PG_SCHEMA}.model_lifecycle_events (deployment_id, event_time)')
+    # Saved-but-not-yet-deployed Deploy-form drafts. Owned/managed entirely by the APP (the deploy
+    # job never writes here), so the app SP gets full DML on this table (below). Per-user via `owner`.
+    _pg_exec(f"""
+        CREATE TABLE IF NOT EXISTS {PG_SCHEMA}.model_deployment_drafts (
+          draft_id BIGINT PRIMARY KEY, owner TEXT, name TEXT, draft_json TEXT, updated_at TIMESTAMPTZ
+        )
+    """)
+    _pg_exec(f'CREATE INDEX IF NOT EXISTS ix_drafts_owner '
+             f'ON {PG_SCHEMA}.model_deployment_drafts (owner, updated_at)')
     if APP_SP:
         # SELECT so the app reads the tables; INSERT so the app server can write the initial
         # "submitted" record + lifecycle event at deploy-submit time (before this job cold-starts).
@@ -335,6 +344,8 @@ def _pg_init():
             f'GRANT USAGE ON SCHEMA {PG_SCHEMA} TO "{APP_SP}"',
             f'GRANT SELECT, INSERT ON ALL TABLES IN SCHEMA {PG_SCHEMA} TO "{APP_SP}"',
             f'ALTER DEFAULT PRIVILEGES IN SCHEMA {PG_SCHEMA} GRANT SELECT, INSERT ON TABLES TO "{APP_SP}"',
+            # Drafts are fully owned by the app (create/update/delete), so grant it UPDATE+DELETE too.
+            f'GRANT SELECT, INSERT, UPDATE, DELETE ON {PG_SCHEMA}.model_deployment_drafts TO "{APP_SP}"',
         ):
             try:
                 _pg_exec(stmt)

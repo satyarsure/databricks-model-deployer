@@ -17,9 +17,78 @@ import {
   ChevronDown,
   GitCompare,
 } from 'lucide-react';
-import type { DeploymentRow, PendingDeployment } from '../types';
+import type { DeploymentRow, PendingDeployment, Draft } from '../types';
+import type { Prefill } from './DeployModel';
 
 const IN_PROGRESS = new Set(['IN_PROGRESS', 'VALIDATING', 'DEPLOYING']);
+
+// Saved (partially-filled) Deploy forms the user can resume. Shown above the deployments table.
+function DraftsPanel({ onResumeDraft }: { onResumeDraft: (id: string, values: Prefill) => void }) {
+  const [nonce, setNonce] = useState(() => Date.now());
+  const { data } = useApiQuery<Draft>(`/api/drafts?nonce=${nonce}`);
+  const drafts = (data ?? []) as Draft[];
+  const [busy, setBusy] = useState<string | null>(null);
+  if (drafts.length === 0) return null;
+
+  const resume = (d: Draft) => {
+    try {
+      onResumeDraft(d.draft_id, JSON.parse(d.draft_json || '{}') as Prefill);
+    } catch {
+      /* ignore a malformed draft */
+    }
+  };
+  const remove = async (id: string) => {
+    setBusy(id);
+    try {
+      await fetch(`/api/drafts/${id}`, { method: 'DELETE' });
+      setNonce(Date.now());
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <div className="border-b bg-muted/30 px-4 py-3">
+      <div className="mb-2 text-xs font-medium text-muted-foreground">
+        Saved drafts ({drafts.length}) — resume a partially-filled deployment
+      </div>
+      <div className="flex flex-col gap-2">
+        {drafts.map((d) => (
+          <div
+            key={d.draft_id}
+            className="flex items-center justify-between gap-3 rounded-md border bg-card px-3 py-2"
+          >
+            <div className="min-w-0">
+              <div className="truncate text-sm font-medium text-foreground">
+                {d.name || 'Untitled draft'}
+              </div>
+              <div className="text-xs text-muted-foreground">saved {formatDate(d.updated_at)}</div>
+            </div>
+            <div className="flex shrink-0 items-center gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                className="h-8 px-3 text-xs"
+                onClick={() => resume(d)}
+              >
+                Resume
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                className="h-8 px-3 text-xs"
+                disabled={busy === d.draft_id}
+                onClick={() => remove(d.draft_id)}
+              >
+                Delete
+              </Button>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 // A placeholder row for a just-submitted deployment, shown immediately (auto-expanded,
 // "Deploy in progress") until the cold-starting deploy job writes its first real row.
@@ -621,12 +690,14 @@ export function DeployedModels({
   onDeployNew,
   onDeployVersion,
   onAbTest,
+  onResumeDraft,
   pending,
   onResolvePending,
 }: {
   onDeployNew: () => void;
   onDeployVersion: (row: DeploymentRow) => void;
   onAbTest: (row: DeploymentRow) => void;
+  onResumeDraft: (id: string, values: Prefill) => void;
   pending: PendingDeployment | null;
   onResolvePending: () => void;
 }) {
@@ -694,6 +765,8 @@ export function DeployedModels({
           Deploy new model
         </Button>
       </div>
+
+      <DraftsPanel onResumeDraft={onResumeDraft} />
 
       <DeploymentsTable
         search={search}

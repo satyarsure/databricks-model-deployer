@@ -41,3 +41,12 @@ export interface PendingDeployment {
   model_name: string;
   uc_full_name: string;
 }
+
+// A saved (partially-filled) Deploy form the user can resume later. `draft_json` is the raw
+// form state (the Prefill shape from DeployModel), serialized. Scoped per user server-side.
+export interface Draft {
+  draft_id: string;
+  name: string;
+  draft_json: string;
+  updated_at: string | null;
+}

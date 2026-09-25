@@ -139,6 +139,12 @@ createApp({
       // shows an empty state instead of an error.
       const DEPLOYMENTS = `${PG_SCHEMA}.model_deployments`;
       const LIFECYCLE = `${PG_SCHEMA}.model_lifecycle_events`;
+      const DRAFTS = `${PG_SCHEMA}.model_deployment_drafts`;
+      // Signed-in user (used to scope drafts per user).
+      const userEmail = (req: { headers: Record<string, unknown> }) =>
+        (req.headers['x-forwarded-email'] as string) ||
+        (req.headers['x-forwarded-user'] as string) ||
+        'unknown';
       // undefined_table / invalid_schema_name / insufficient_privilege -> treat as "empty".
       const PG_EMPTY_CODES = new Set(['42P01', '3F000', '42501']);
       const pgErr = (e: unknown) => (e as { code?: string; message?: string }) ?? {};
@@ -259,6 +265,80 @@ createApp({
           (req.headers['x-forwarded-user'] as string) ||
           '';
         res.json({ email });
+      });
+
+      // ---- Drafts: save a partially-filled Deploy form and resume it later --------------------
+      // Per-user (scoped by `owner`); the draft body is the raw form state as JSON. Fully managed
+      // by the app (create/update/delete). Tolerates the table not existing yet (before the job's
+      // migration) by returning an empty list / a clear error.
+      app.get('/api/drafts', async (req, res) => {
+        try {
+          const { rows } = await pgQuery(
+            `SELECT draft_id::text, name, draft_json, updated_at
+             FROM ${DRAFTS} WHERE owner = $1 ORDER BY updated_at DESC LIMIT 100`,
+            [userEmail(req)],
+          );
+          res.json(rows);
+        } catch (e) {
+          if (isEmpty(e)) { noteEmpty('/api/drafts', e); res.json([]); return; }
+          console.error('[lakebase] /api/drafts list failed:', e);
+          res.status(500).json({ error: String(pgErr(e).message ?? e) });
+        }
+      });
+
+      const draftBodySchema = z.object({
+        draft_id: z.string().regex(/^\d+$/).optional(),
+        name: z.string().optional().default(''),
+        draft: z.record(z.string(), z.any()).default({}),
+      });
+
+      app.post('/api/drafts', async (req, res) => {
+        const parsed = draftBodySchema.safeParse(req.body);
+        if (!parsed.success) {
+          res.status(400).json({ error: 'Invalid draft', details: parsed.error.issues });
+          return;
+        }
+        const owner = userEmail(req);
+        const draftId = parsed.data.draft_id ? Number(parsed.data.draft_id) : Date.now();
+        const name = (parsed.data.name || '').trim() || 'Untitled draft';
+        try {
+          // Upsert; the owner guard in the WHERE of DO UPDATE prevents overwriting someone else's
+          // draft that happened to collide on id.
+          await pgQuery(
+            `INSERT INTO ${DRAFTS} (draft_id, owner, name, draft_json, updated_at)
+             VALUES ($1,$2,$3,$4, now())
+             ON CONFLICT (draft_id) DO UPDATE SET
+               name = EXCLUDED.name, draft_json = EXCLUDED.draft_json, updated_at = now()
+             WHERE ${DRAFTS}.owner = EXCLUDED.owner`,
+            [draftId, owner, name, JSON.stringify(parsed.data.draft ?? {})],
+          );
+          res.status(200).json({ ok: true, draft_id: String(draftId) });
+        } catch (e) {
+          if (pgErr(e).code === '42P01') {
+            res.status(503).json({
+              error:
+                'Drafts are not available yet — the deploy job must run once to create the table. ' +
+                'Deploy any model (or re-run the job) first.',
+            });
+            return;
+          }
+          console.error('[lakebase] /api/drafts save failed:', e);
+          res.status(500).json({ error: String(pgErr(e).message ?? e) });
+        }
+      });
+
+      app.delete('/api/drafts/:id', async (req, res) => {
+        const id = String(req.params.id);
+        if (!/^\d+$/.test(id)) { res.status(400).json({ error: 'bad draft id' }); return; }
+        try {
+          await pgQuery(`DELETE FROM ${DRAFTS} WHERE draft_id = $1::bigint AND owner = $2`,
+            [id, userEmail(req)]);
+          res.json({ ok: true });
+        } catch (e) {
+          if (isEmpty(e)) { res.json({ ok: true }); return; }
+          console.error('[lakebase] /api/drafts delete failed:', e);
+          res.status(500).json({ error: String(pgErr(e).message ?? e) });
+        }
       });
 
       // Kick off a deployment: validate the spec, trigger the deploy Job, and write an initial
