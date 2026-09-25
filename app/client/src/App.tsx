@@ -1,10 +1,10 @@
 import { useEffect, useState } from 'react';
 import { Rocket } from 'lucide-react';
-import { DeployedModels } from './pages/DeployedModels';
+import { DeployedModels, SavedDrafts } from './pages/DeployedModels';
 import { DeployModel, type Prefill } from './pages/DeployModel';
 import type { DeploymentRow, PendingDeployment } from './types';
 
-type Tab = 'deployed' | 'deploy';
+type Tab = 'deployed' | 'deploy' | 'drafts';
 
 // A just-submitted deployment is shown optimistically until the deploy job writes its
 // first row. Persist it so a hard page reload during the job's cold-start window (before
@@ -113,6 +113,13 @@ export default function App() {
                 ? `Deploy Model — ${prefill.model_name}`
                 : 'Deploy Model'}
           </button>
+          <button
+            type="button"
+            className={tabClass(tab === 'drafts')}
+            onClick={() => setTab('drafts')}
+          >
+            Saved drafts
+          </button>
         </div>
       </div>
 
@@ -140,6 +147,9 @@ export default function App() {
                 setAbBaseline(row);
                 setTab('deploy');
               }}
+            />
+          ) : tab === 'drafts' ? (
+            <SavedDrafts
               onResumeDraft={(id, values) => {
                 setPrefill(null);
                 setAbBaseline(null);

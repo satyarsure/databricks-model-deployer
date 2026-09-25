@@ -22,13 +22,16 @@ import type { Prefill } from './DeployModel';
 
 const IN_PROGRESS = new Set(['IN_PROGRESS', 'VALIDATING', 'DEPLOYING']);
 
-// Saved (partially-filled) Deploy forms the user can resume. Shown above the deployments table.
-function DraftsPanel({ onResumeDraft }: { onResumeDraft: (id: string, values: Prefill) => void }) {
+// Saved (partially-filled) Deploy forms the user can resume — its own "Saved drafts" tab.
+export function SavedDrafts({
+  onResumeDraft,
+}: {
+  onResumeDraft: (id: string, values: Prefill) => void;
+}) {
   const [nonce, setNonce] = useState(() => Date.now());
-  const { data } = useApiQuery<Draft>(`/api/drafts?nonce=${nonce}`);
+  const { data, loading } = useApiQuery<Draft>(`/api/drafts?nonce=${nonce}`);
   const drafts = (data ?? []) as Draft[];
   const [busy, setBusy] = useState<string | null>(null);
-  if (drafts.length === 0) return null;
 
   const resume = (d: Draft) => {
     try {
@@ -48,44 +51,50 @@ function DraftsPanel({ onResumeDraft }: { onResumeDraft: (id: string, values: Pr
   };
 
   return (
-    <div className="border-b bg-muted/30 px-4 py-3">
-      <div className="mb-2 text-xs font-medium text-muted-foreground">
-        Saved drafts ({drafts.length}) — resume a partially-filled deployment
+    <div className="rounded-lg border bg-card shadow-sm">
+      <div className="border-b px-4 py-3 text-sm font-medium text-foreground">
+        Saved drafts{drafts.length ? ` (${drafts.length})` : ''}
       </div>
-      <div className="flex flex-col gap-2">
-        {drafts.map((d) => (
-          <div
-            key={d.draft_id}
-            className="flex items-center justify-between gap-3 rounded-md border bg-card px-3 py-2"
-          >
-            <div className="min-w-0">
-              <div className="truncate text-sm font-medium text-foreground">
-                {d.name || 'Untitled draft'}
+      {loading && drafts.length === 0 ? (
+        <div className="p-4">
+          <Skeleton className="h-14 w-full" />
+        </div>
+      ) : drafts.length === 0 ? (
+        <div className="px-4 py-10 text-center text-sm text-muted-foreground">
+          No saved drafts. On the <span className="font-medium">Deploy Model</span> tab, fill in what
+          you have and click <span className="font-medium">Save draft</span> to come back to it later.
+        </div>
+      ) : (
+        <div className="flex flex-col gap-2 p-4">
+          {drafts.map((d) => (
+            <div
+              key={d.draft_id}
+              className="flex items-center justify-between gap-3 rounded-md border bg-background px-3 py-2"
+            >
+              <div className="min-w-0">
+                <div className="truncate text-sm font-medium text-foreground">
+                  {d.name || 'Untitled draft'}
+                </div>
+                <div className="text-xs text-muted-foreground">saved {formatDate(d.updated_at)}</div>
               </div>
-              <div className="text-xs text-muted-foreground">saved {formatDate(d.updated_at)}</div>
+              <div className="flex shrink-0 items-center gap-2">
+                <Button type="button" className="h-8 px-3 text-xs" onClick={() => resume(d)}>
+                  Resume
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="h-8 px-3 text-xs"
+                  disabled={busy === d.draft_id}
+                  onClick={() => remove(d.draft_id)}
+                >
+                  Delete
+                </Button>
+              </div>
             </div>
-            <div className="flex shrink-0 items-center gap-2">
-              <Button
-                type="button"
-                variant="outline"
-                className="h-8 px-3 text-xs"
-                onClick={() => resume(d)}
-              >
-                Resume
-              </Button>
-              <Button
-                type="button"
-                variant="outline"
-                className="h-8 px-3 text-xs"
-                disabled={busy === d.draft_id}
-                onClick={() => remove(d.draft_id)}
-              >
-                Delete
-              </Button>
-            </div>
-          </div>
-        ))}
-      </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -690,14 +699,12 @@ export function DeployedModels({
   onDeployNew,
   onDeployVersion,
   onAbTest,
-  onResumeDraft,
   pending,
   onResolvePending,
 }: {
   onDeployNew: () => void;
   onDeployVersion: (row: DeploymentRow) => void;
   onAbTest: (row: DeploymentRow) => void;
-  onResumeDraft: (id: string, values: Prefill) => void;
   pending: PendingDeployment | null;
   onResolvePending: () => void;
 }) {
@@ -765,8 +772,6 @@ export function DeployedModels({
           Deploy new model
         </Button>
       </div>
-
-      <DraftsPanel onResumeDraft={onResumeDraft} />
 
       <DeploymentsTable
         search={search}
