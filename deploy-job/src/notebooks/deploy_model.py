@@ -311,12 +311,15 @@ def _pg_init():
           compute_type TEXT, gpu_type TEXT, compute_size TEXT, scale_to_zero BOOLEAN,
           artifacts_json TEXT, input_schema_json TEXT, output_schema_json TEXT,
           permissions_json TEXT,
+          contract_mode TEXT, sample_input_json TEXT, sample_output_json TEXT,
           endpoint_name TEXT, invoke_url TEXT, status TEXT, stage TEXT, error_message TEXT,
           deployed_by TEXT, deployed_date TIMESTAMPTZ, updated_at TIMESTAMPTZ, run_id TEXT
         )
     """)
-    # Migrate tables created before permissions were added (idempotent, no-op once present).
+    # Migrate tables created before these columns existed (idempotent, no-op once present).
     _pg_exec(f'ALTER TABLE {PG_SCHEMA}.model_deployments ADD COLUMN IF NOT EXISTS permissions_json TEXT')
+    for _c in ("contract_mode", "sample_input_json", "sample_output_json"):
+        _pg_exec(f'ALTER TABLE {PG_SCHEMA}.model_deployments ADD COLUMN IF NOT EXISTS {_c} TEXT')
     _pg_exec(f"""
         CREATE TABLE IF NOT EXISTS {PG_SCHEMA}.model_lifecycle_events (
           event_id BIGINT PRIMARY KEY, deployment_id BIGINT, model_name TEXT, uc_full_name TEXT,
@@ -362,6 +365,12 @@ merge_status(
     input_schema_json=json.dumps(spec.get("input_schema", [])),
     output_schema_json=json.dumps(spec.get("output_schema", [])),
     permissions_json=json.dumps(spec.get("permissions", {})),
+    # Record the contract the user provided: 'sample' when a sample input+output was given, else
+    # 'schema'. The raw sample JSON is stored so it can be shown/prefilled on a new version.
+    contract_mode=("sample" if (str(spec.get("sample_input") or "").strip()
+                                 and str(spec.get("sample_output") or "").strip()) else "schema"),
+    sample_input_json=(spec.get("sample_input") or ""),
+    sample_output_json=(spec.get("sample_output") or ""),
     endpoint_name=endpoint_name, status="IN_PROGRESS", stage="wrapper",
     deployed_by=spec.get("deployed_by"), run_id=run_id,
 )

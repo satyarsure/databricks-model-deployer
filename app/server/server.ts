@@ -174,19 +174,38 @@ createApp({
         }
       };
 
+      // The sample-contract columns are added by the deploy job's _pg_init migration, which runs on
+      // a job run — so on a freshly-upgraded app whose job hasn't re-run yet they may not exist.
+      // Build the SELECT with the real columns, or NULL placeholders as a fallback (see 42703 below).
+      const deploymentsSelect = (withSample: boolean) =>
+        `SELECT deployment_id::text, model_name, description, uc_full_name, uc_catalog,
+                uc_schema, uc_model, model_version, status, stage, error_message,
+                endpoint_name, invoke_url, experiment_name, eval_dataset,
+                serverless_usage_policy, tags, artifacts_json, input_schema_json,
+                output_schema_json, permissions_json,
+                ${withSample
+                  ? 'contract_mode, sample_input_json, sample_output_json'
+                  : 'NULL AS contract_mode, NULL AS sample_input_json, NULL AS sample_output_json'},
+                compute_type, gpu_type, compute_size,
+                scale_to_zero::text, deployed_by, deployed_date, updated_at
+         FROM ${DEPLOYMENTS}
+         ORDER BY deployed_date DESC NULLS LAST, updated_at DESC NULLS LAST
+         LIMIT 200`;
+
       app.get('/api/deployments', async (_req, res) => {
         try {
-          const { rows } = await pgQuery(
-            `SELECT deployment_id::text, model_name, description, uc_full_name, uc_catalog,
-                    uc_schema, uc_model, model_version, status, stage, error_message,
-                    endpoint_name, invoke_url, experiment_name, eval_dataset,
-                    serverless_usage_policy, tags, artifacts_json, input_schema_json,
-                    output_schema_json, permissions_json, compute_type, gpu_type, compute_size,
-                    scale_to_zero::text, deployed_by, deployed_date, updated_at
-             FROM ${DEPLOYMENTS}
-             ORDER BY deployed_date DESC NULLS LAST, updated_at DESC NULLS LAST
-             LIMIT 200`,
-          );
+          let rows;
+          try {
+            ({ rows } = await pgQuery(deploymentsSelect(true)));
+          } catch (e) {
+            // 42703 = undefined_column: sample-contract columns not migrated yet (job hasn't run
+            // _pg_init since the upgrade). Fall back to NULLs so the board still loads.
+            if (pgErr(e).code === '42703') {
+              ({ rows } = await pgQuery(deploymentsSelect(false)));
+            } else {
+              throw e;
+            }
+          }
           res.json(rows);
         } catch (e) {
           if (isEmpty(e)) { noteEmpty('/api/deployments', e); res.json([]); return; }
@@ -297,15 +316,20 @@ createApp({
         try {
           const uc = spec.uc;
           const ucFull = `${uc.catalog}.${uc.schema}.${uc.model}`;
+          // 'sample' when a sample input+output defined the contract, else 'schema'. Store the raw
+          // sample JSON so it can be shown/prefilled on a new version (mirrors the job's writer).
+          const contractMode =
+            spec.sample_input.trim() && spec.sample_output.trim() ? 'sample' : 'schema';
           await pgQuery(
             `INSERT INTO ${PG_SCHEMA}.model_deployments
                (deployment_id, model_name, description, uc_catalog, uc_schema, uc_model,
                 uc_full_name, experiment_name, eval_dataset, serverless_usage_policy, tags,
                 compute_type, gpu_type, compute_size, scale_to_zero, artifacts_json,
-                input_schema_json, output_schema_json, permissions_json, status, stage,
+                input_schema_json, output_schema_json, permissions_json, contract_mode,
+                sample_input_json, sample_output_json, status, stage,
                 deployed_by, deployed_date, updated_at)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,
-                     'IN_PROGRESS','submitted',$20, now(), now())
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,
+                     'IN_PROGRESS','submitted',$23, now(), now())
              ON CONFLICT (deployment_id) DO NOTHING`,
             [
               deploymentId, spec.name, spec.description, uc.catalog, uc.schema, uc.model,
@@ -314,6 +338,7 @@ createApp({
               spec.compute.gpu_type ?? null, spec.compute.size, spec.compute.scale_to_zero,
               JSON.stringify(spec.artifacts ?? []), JSON.stringify(spec.input_schema ?? []),
               JSON.stringify(spec.output_schema ?? []), JSON.stringify(spec.permissions ?? {}),
+              contractMode, spec.sample_input, spec.sample_output,
               email,
             ],
           );

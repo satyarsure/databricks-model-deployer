@@ -164,6 +164,12 @@ function parsePrefill(row: DeploymentRow | null): Prefill | null {
     inputSchemaText: row.input_schema_json || '[]',
     outputSchemaText:
       row.output_schema_json || '[\n  { "name": "prediction", "type": "double" }\n]',
+    // Restore a sample-defined contract so a new version prefills it and opens in sample mode.
+    // Only set when the deployment actually used sample mode (else the form stays in schema mode).
+    sampleInputText:
+      row.contract_mode === 'sample' && row.sample_input_json ? row.sample_input_json : undefined,
+    sampleOutputText:
+      row.contract_mode === 'sample' && row.sample_output_json ? row.sample_output_json : undefined,
     experimentName: row.experiment_name ?? '',
     evalDataset: row.eval_dataset ?? '',
     ucCatalog: row.uc_catalog ?? '',
