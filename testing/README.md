@@ -44,8 +44,16 @@ path, an A/B traffic split, and two failure paths — every stage of
    watch the row on **Deployed Models** (it auto-expands and streams the lifecycle timeline while
    in progress).
 
-> **Input / Output schema** are entered as **JSON strings** — paste the JSON blocks verbatim.
-> **Tags** is a JSON object. Every feature type is `double`; classifier outputs use `long`.
+> **Model contract** — most cases below use **Columnar schema** mode (Input/Output schema as JSON
+> strings; every feature type is `double`, classifier outputs use `long`). For text / JSON / tensor
+> models, switch the **"Model contract"** selector to **Sample input / output** and paste a real
+> example instead of schemas (see **TC11**). Either way a signature is produced — UC requires one, so
+> you can't deploy with no contract. A **failed validation smoke test is non-fatal** (it's surfaced on
+> the lifecycle timeline and the deployment still proceeds to serving).
+>
+> **Tags** is a JSON object. Serving endpoints allow **at most 20 tags total** — your form Tags +
+> governance tags come first; if over 20, the auto-added `deployed_by`/`gpu_type`/`application` are
+> dropped (logged on the run).
 >
 > **Experiment name** and **Serverless usage policy** are now **optional overrides** — leave either
 > blank to use the environment's configured default (`var.experiment` / `var.budget_policy_id`). The
@@ -467,6 +475,45 @@ databricks permissions get serving-endpoints "$EID" --profile <PROFILE> -o json 
 
 > Leave the field blank to grant no one else (the deploying user still gets `CAN_MANAGE`). Keys must
 > be `can_manage` / `can_query` / `can_view`, each an array of principal strings.
+
+---
+
+## TC11 — Text model via SAMPLE input/output (no schema) ⭐
+
+Deploy a text classifier whose contract is `{"instances": [...]}` → `{"predictions": [...]}` — the
+kind of model that has no columnar schema. Uses **Sample** contract mode.
+
+> **Fixture:** you need a **full pipeline** artifact that takes raw text, e.g. an sklearn
+> `Pipeline([TfidfVectorizer, LinearSVC])` trained on a few labelled strings, saved to the volume as
+> `text_clf.pkl`. A bare classifier (no vectorizer) will register but fail at query time — it can't
+> take strings.
+
+| field | value |
+|---|---|
+| Model Name | `protocol-text-clf` |
+| Artifact | UC Volume · `/Volumes/<catalog>/<schema>/<volume>/text_clf.pkl` |
+| **Model contract** | **Sample input / output** |
+| UC Model name | `<catalog>` · `<schema>` · `protocol_text_clf` |
+| Compute | CPU · SMALL · Scale-to-zero ON |
+
+Sample input:
+```json
+{"instances": ["Pregnancy Test", "EKG"]}
+```
+Sample output:
+```json
+{"predictions": ["non-invasive", "non-invasive"]}
+```
+
+**Expected:** the job **infers a tensor signature** from the sample (no columnar schema needed),
+registers to UC, and the endpoint serves the **native** contract. Query it with the exact format:
+```bash
+databricks serving-endpoints query protocol_text_clf_endpoint \
+  --json '{"instances": ["Pregnancy Test", "EKG", "Biopsy"]}' --profile <PROFILE>
+# → {"predictions": ["non-invasive", "non-invasive", "invasive"]}   (flat list, one per input)
+```
+On **Deployed Models**, the row records `contract_mode = sample`; clicking the model name to deploy a
+**new version** re-opens the form in **Sample** mode with the sample pre-filled.
 
 ## What to check in the UI (every case)
 

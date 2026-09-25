@@ -221,7 +221,9 @@ databricks postgres list-endpoints  <LB_BRANCH> --profile <PROFILE>             
 ```
 
 The deploy job **self-creates** the `<PG_SCHEMA>` schema and the two tables on its first run — no
-manual Postgres DDL is required.
+manual Postgres DDL is required. On **upgrades**, any new columns are added the same way (idempotent
+`ADD COLUMN IF NOT EXISTS`) on the next job run, so there's nothing to migrate by hand; the app also
+tolerates a not-yet-migrated column, so the board keeps working during a rollout.
 
 **4b. Unity Catalog** (registered models + artifacts volume). Run once:
 

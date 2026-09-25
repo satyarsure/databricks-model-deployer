@@ -27,9 +27,11 @@ React/AppKit app
                             so a real row shows instantly, then (2) triggers the deploy job.
                                                    │
 Deploy job (DABs, serverless) — one notebook, three stages:
-   Wrapper    → load artifact(s), wrap as MLflow pyfunc, build signature, register each new-artifact
-                variant to UC (a variant may instead reference an existing registered version)
-   Validator  → load the registered pyfunc, smoke-test predict, optional mlflow.evaluate vs an eval dataset
+   Wrapper    → load artifact(s), wrap as MLflow pyfunc, build the SIGNATURE (from a columnar schema,
+                OR inferred from a sample input/output — see "Model contract" below), register each
+                new-artifact variant to UC (a variant may instead reference an existing version)
+   Validator  → load the registered pyfunc, smoke-test predict (non-fatal — surfaced on the timeline
+                but never blocks serving), optional mlflow.evaluate vs an eval dataset
    Deployer   → create/update the serving endpoint (traffic split, compute, scale-to-zero, tags,
                 budget policy, inference tables, access permissions); set the UC @champion alias
    (every stage writes status to Lakebase model_deployments and appends to model_lifecycle_events)
@@ -79,11 +81,15 @@ operational store — chosen over a SQL warehouse because the Deployed Models bo
 frequently-updated status view that needs point reads at OLTP latency:
 
 - **`model_deployments`** — one row per deployment (name, UC name, version, status/stage, endpoint,
-  compute, tags, schemas, budget policy, endpoint permissions, timestamps). Upserted by `deployment_id`.
+  compute, tags, input/output schemas, **contract mode + sample input/output**, budget policy,
+  endpoint permissions, timestamps). Upserted by `deployment_id`.
 - **`model_lifecycle_events`** — append-only audit trail of every stage/status transition.
 
 The **deploy job owns the schema**: on each run it self-creates the schema + tables (`CREATE …
-IF NOT EXISTS`, via `psycopg`) and grants the app's service principal `SELECT, INSERT`. It connects
+IF NOT EXISTS`, via `psycopg`) and grants the app's service principal `SELECT, INSERT`. New columns
+are added the same way (idempotent `ADD COLUMN IF NOT EXISTS`), so upgrades need no manual DDL — the
+migration applies on the next job run, and the app tolerates a not-yet-migrated column so the board
+never breaks during a rollout. It connects
 using a short-lived OAuth **database credential** for its own identity (`POST
 /api/2.0/postgres/credentials`) — no static secret. The **app server** writes the initial
 "submitted" record on `/api/deploy` (so a real row appears during the job's serverless cold-start),
@@ -92,6 +98,25 @@ then the job upserts the same row as it runs.
 **Unity Catalog** (`<catalog>.<schema>`) still holds the **registered models** and the **`artifacts`
 volume** (uploaded/test artifacts). The catalog/schema/volume are provisioned up front; the two app
 tables are **not** in UC anymore — they live in Lakebase.
+
+## Model contract (schema or sample)
+
+Unity Catalog requires every registered model to have a **signature** (input **and** output types),
+so each deployment defines its contract one of two ways — chosen on the Deploy form:
+
+- **Columnar schema** — an `input_schema` + `output_schema` of named columns → a tabular (ColSpec)
+  signature. Best for tabular models. Served via `dataframe_records` / `dataframe_split`.
+- **Sample input / output** — paste a real example (e.g. `{"instances": ["Pregnancy Test", "EKG"]}`
+  → `{"predictions": ["non-invasive", ...]}`). The job unwraps the serving envelope and infers the
+  signature with `mlflow.infer_signature`; a list/array sample yields a **tensor** signature, which
+  serves the native **`{"instances": [...]}`** contract. Best for text / NLP / JSON / tensor models,
+  and the smoke test runs on the **real** sample instead of a synthetic dummy.
+
+The chosen mode and the raw sample are stored on `model_deployments` (`contract_mode`,
+`sample_input_json`, `sample_output_json`) so a **new version prefills** the sample. Text models are
+handed a 1-D list of strings (not a DataFrame) and 1-D predictions are returned **flat**
+(`{"predictions": [...]}`), matching a text classifier's native contract. Whichever mode you use, a
+signature is always produced — you can't register to UC with none.
 
 ## Configuration (no environment-specific values are committed)
 
@@ -172,7 +197,10 @@ configured once per environment and applied everywhere Model Deployer spends ser
   the environment default) at create time, plus the job's `resource_tags` **and** any per-deployment
   *Tags* from the form (form tags win on key collisions). Tags are applied via the tags API (non-fatal)
   and **re-synced on every new-version/A/B update**; `budget_policy_id` and `description` are
-  **create-time only** (no serving API updates them post-create).
+  **create-time only** (no serving API updates them post-create). Serving endpoints allow **at most
+  20 tags total** — if the combined set exceeds that, the UI/form tags and governance tags are kept
+  first and the auto-added `deployed_by`/`gpu_type`/`application` are dropped (logged on the run),
+  so a large tag set never zeroes out all tags.
 - **App** — carries the same `budget_policy_id` (Databricks Apps don't support custom tags via DABs,
   so the policy is the app's cost-attribution handle).
 - **Lakebase project** — tag it at create time with the project's own `custom_tags` and
