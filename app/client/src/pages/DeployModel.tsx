@@ -26,6 +26,8 @@ interface Prefill {
   artifacts: Artifact[];
   inputSchemaText: string;
   outputSchemaText: string;
+  sampleInputText?: string;
+  sampleOutputText?: string;
   experimentName: string;
   evalDataset: string;
   ucCatalog: string;
@@ -355,6 +357,18 @@ export function DeployModel({
   const [outputSchemaText, setOutputSchemaText] = useState(
     pf?.outputSchemaText ?? '[\n  { "name": "prediction", "type": "double" }\n]',
   );
+  // Contract can be defined by a columnar SCHEMA (default) or by a real SAMPLE input/output
+  // (preferred for text / JSON / tensor models like {"instances": [...]}). The deploy job infers
+  // the MLflow signature from the sample, so it matches the model's native serving contract.
+  const [contractMode, setContractMode] = useState<'schema' | 'sample'>(
+    pf?.sampleInputText ? 'sample' : 'schema',
+  );
+  const [sampleInputText, setSampleInputText] = useState(
+    pf?.sampleInputText ?? '{\n  "instances": ["example one", "example two"]\n}',
+  );
+  const [sampleOutputText, setSampleOutputText] = useState(
+    pf?.sampleOutputText ?? '{\n  "predictions": ["label one", "label two"]\n}',
+  );
   const [experimentName, setExperimentName] = useState(pf?.experimentName ?? '');
   const [evalDataset, setEvalDataset] = useState(pf?.evalDataset ?? '');
   const [ucCatalog, setUcCatalog] = useState(pf?.ucCatalog ?? '');
@@ -406,10 +420,28 @@ export function DeployModel({
       return 'Every existing-model variant needs a version.';
     if (artifacts.length > 1 && trafficTotal !== 100)
       return `A/B traffic must total 100% (currently ${trafficTotal}%).`;
-    const inCheck = parseSchema(inputSchemaText, false);
-    if (!inCheck.ok) return `Input schema ${inCheck.error}.`;
-    const outCheck = parseSchema(outputSchemaText, true);
-    if (!outCheck.ok) return `Output schema ${outCheck.error}.`;
+    if (contractMode === 'sample') {
+      // Sample mode: both sample input and output must be valid, non-empty JSON. The deploy job
+      // infers the UC signature from them, so no columnar schema is needed.
+      for (const [label, txt] of [
+        ['Sample input', sampleInputText],
+        ['Sample output', sampleOutputText],
+      ] as const) {
+        if (!txt.trim()) return `${label} is required in sample mode.`;
+        try {
+          JSON.parse(txt);
+        } catch {
+          return `${label} must be valid JSON.`;
+        }
+      }
+    } else {
+      const inCheck = parseSchema(inputSchemaText, false);
+      if (!inCheck.ok) return `Input schema ${inCheck.error}.`;
+      // Output schema is required in schema mode — Unity Catalog rejects models with no signature
+      // (needs input + output type specs). Give the model's real output type.
+      const outCheck = parseSchema(outputSchemaText, true);
+      if (!outCheck.ok) return `Output schema ${outCheck.error}.`;
+    }
     // Experiment and serverless usage policy are OPTIONAL overrides — when blank, the deploy job
     // uses the environment's configured defaults (var.experiment / var.budget_policy_id).
     if (!ucCatalog.trim() || !ucSchema.trim() || !ucModel.trim())
@@ -438,7 +470,7 @@ export function DeployModel({
     try {
       const inParsed = parseSchema(inputSchemaText, false);
       const outParsed = parseSchema(outputSchemaText, true);
-      if (!inParsed.ok || !outParsed.ok) {
+      if (contractMode === 'schema' && (!inParsed.ok || !outParsed.ok)) {
         setError('Input/Output schema must be valid JSON.');
         setSubmitting(false);
         return;
@@ -468,8 +500,13 @@ export function DeployModel({
                 traffic_percent: Number(a.traffic_percent) || 0,
               },
         ),
-        input_schema: inParsed.fields,
-        output_schema: outParsed.fields,
+        input_schema: contractMode === 'schema' && inParsed.ok ? inParsed.fields : [],
+        output_schema: contractMode === 'schema' && outParsed.ok ? outParsed.fields : [],
+        // Sample-defined contract (preferred for text/JSON/tensor models): the job infers the
+        // signature from these and serves the model's native format (e.g. {"instances": [...]}).
+        ...(contractMode === 'sample'
+          ? { sample_input: sampleInputText.trim(), sample_output: sampleOutputText.trim() }
+          : {}),
         experiment_name: experimentName.trim(),
         eval_dataset: evalDataset.trim(),
         serverless_usage_policy: usagePolicy.trim(),
@@ -677,28 +714,72 @@ export function DeployModel({
         </Section>
 
         <Section
-          title="Input Schema"
-          hint={`JSON array of the model's input columns, e.g. [{"name": "f1", "type": "double"}].`}
+          title="Model contract"
+          hint={`How to describe the model's inputs/outputs. Use "Sample" for text / JSON / tensor models (e.g. {"instances": [...]}) — the deploy job infers the MLflow signature from your example so the endpoint serves the model's native format.`}
         >
-          <textarea
-            className={`${inputCls} min-h-[96px] font-mono text-xs`}
-            placeholder='[{"name": "f1", "type": "double"}]'
-            value={inputSchemaText}
-            onChange={(e) => setInputSchemaText(e.target.value)}
-          />
+          <select
+            className={inputCls}
+            value={contractMode}
+            onChange={(e) => setContractMode(e.target.value as 'schema' | 'sample')}
+          >
+            <option value="schema">Columnar schema (tabular models)</option>
+            <option value="sample">Sample input / output (text, JSON, tensor)</option>
+          </select>
         </Section>
 
-        <Section
-          title="Output Schema"
-          hint={`JSON array (at least one field); maps to the MLflow signature outputs, e.g. [{"name": "prediction", "type": "double"}].`}
-        >
-          <textarea
-            className={`${inputCls} min-h-[96px] font-mono text-xs`}
-            placeholder='[{"name": "prediction", "type": "double"}]'
-            value={outputSchemaText}
-            onChange={(e) => setOutputSchemaText(e.target.value)}
-          />
-        </Section>
+        {contractMode === 'schema' ? (
+          <>
+            <Section
+              title="Input Schema"
+              hint={`JSON array of the model's input columns, e.g. [{"name": "f1", "type": "double"}]. For a text model use a single string column, e.g. [{"name": "text", "type": "string"}].`}
+            >
+              <textarea
+                className={`${inputCls} min-h-[96px] font-mono text-xs`}
+                placeholder='[{"name": "f1", "type": "double"}]'
+                value={inputSchemaText}
+                onChange={(e) => setInputSchemaText(e.target.value)}
+              />
+            </Section>
+
+            <Section
+              title="Output Schema"
+              hint={`Required — Unity Catalog needs a model signature (both input and output types). e.g. [{"name": "prediction", "type": "double"}], or "long" for class labels, "string" for text labels.`}
+            >
+              <textarea
+                className={`${inputCls} min-h-[96px] font-mono text-xs`}
+                placeholder='[{"name": "prediction", "type": "double"}]'
+                value={outputSchemaText}
+                onChange={(e) => setOutputSchemaText(e.target.value)}
+              />
+            </Section>
+          </>
+        ) : (
+          <>
+            <Section
+              title="Sample input"
+              hint={`The exact request your model accepts — paste the real serving payload, e.g. {"instances": ["Pregnancy Test", "EKG"]}.`}
+            >
+              <textarea
+                className={`${inputCls} min-h-[96px] font-mono text-xs`}
+                placeholder='{"instances": ["Pregnancy Test", "EKG"]}'
+                value={sampleInputText}
+                onChange={(e) => setSampleInputText(e.target.value)}
+              />
+            </Section>
+
+            <Section
+              title="Sample output"
+              hint={`The matching response, e.g. {"predictions": ["non-invasive", "non-invasive"]}. Used to infer the model's output signature.`}
+            >
+              <textarea
+                className={`${inputCls} min-h-[96px] font-mono text-xs`}
+                placeholder='{"predictions": ["non-invasive", "non-invasive"]}'
+                value={sampleOutputText}
+                onChange={(e) => setSampleOutputText(e.target.value)}
+              />
+            </Section>
+          </>
+        )}
 
         <Section
           title="Experiment name"

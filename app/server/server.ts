@@ -60,8 +60,15 @@ const deploySpecSchema = z.object({
   name: z.string().min(1),
   description: z.string().optional().default(''),
   artifacts: z.array(artifactSchema).min(1),
+  // A model's contract is defined EITHER by a columnar schema (input_schema + output_schema) OR by
+  // a real sample_input + sample_output (below). Unity Catalog rejects models registered without a
+  // signature, so exactly one of the two must be provided — enforced by the superRefine at the end.
   input_schema: z.array(fieldSchema).default([]),
-  output_schema: z.array(fieldSchema).min(1),
+  output_schema: z.array(fieldSchema).default([]),
+  // Sample-defined contract (preferred for text / JSON / tensor models, e.g. {"instances": [...]}).
+  // Raw JSON text; the deploy job unwraps the serving envelope and infers the signature from it.
+  sample_input: z.string().optional().default(''),
+  sample_output: z.string().optional().default(''),
   // Optional: when blank, the deploy job falls back to the bundle defaults (var.experiment /
   // var.budget_policy_id) configured for the environment.
   experiment_name: z.string().optional().default(''),
@@ -91,6 +98,19 @@ const deploySpecSchema = z.object({
     scale_to_zero: z.boolean().default(true),
   }),
   endpoint_name: z.string().optional(),
+}).superRefine((s, ctx) => {
+  // UC requires a signature, so a contract must be defined one of two ways: an output schema, or a
+  // sample input + output. Reject a spec that supplies neither.
+  const hasSchema = s.output_schema.length > 0;
+  const hasSample = s.sample_input.trim() !== '' && s.sample_output.trim() !== '';
+  if (!hasSchema && !hasSample) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message:
+        'Define the model contract: provide an output_schema, or both sample_input and sample_output.',
+      path: ['output_schema'],
+    });
+  }
 });
 
 createApp({
