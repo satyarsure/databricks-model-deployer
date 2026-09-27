@@ -783,6 +783,7 @@ export function DeployModel({
 
         <Section
           title="Model contract"
+          required
           hint={`How to describe the model's inputs/outputs. Use "Sample" for text / JSON / tensor models (e.g. {"instances": [...]}) — the deploy job infers the MLflow signature from your example so the endpoint serves the model's native format.`}
         >
           <select
