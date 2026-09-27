@@ -216,16 +216,25 @@ const inputCls =
 function Section({
   title,
   hint,
+  required,
   children,
 }: {
   title: string;
   hint?: string;
+  required?: boolean;
   children: ReactNode;
 }) {
   return (
     <div className="space-y-2">
       <div>
-        <Label className="text-sm font-semibold text-foreground">{title}</Label>
+        <Label className="text-sm font-semibold text-foreground">
+          {title}
+          {required && (
+            <span className="ml-0.5 text-destructive" title="Required" aria-hidden="true">
+              *
+            </span>
+          )}
+        </Label>
         {hint && <p className="text-xs text-muted-foreground">{hint}</p>}
       </div>
       {children}
@@ -629,7 +638,11 @@ export function DeployModel({
           </div>
         )}
 
-        <Section title="Model Name">
+        <p className="text-xs text-muted-foreground">
+          <span className="text-destructive">*</span> Required field
+        </p>
+
+        <Section title="Model Name" required>
           <input
             className={inputCls + lockedCls}
             placeholder="e.g. customer_churn_xgb"
@@ -650,6 +663,7 @@ export function DeployModel({
 
         <Section
           title="Artifacts"
+          required
           hint={
             canUseExisting
               ? 'One or more variants. Each can be a new artifact (S3 or UC Volume) or an existing registered version of this model — switch with the toggle. Add multiple to A/B test with a traffic split that totals 100%.'
@@ -797,6 +811,7 @@ export function DeployModel({
 
             <Section
               title="Output Schema"
+              required
               hint={`Required — Unity Catalog needs a model signature (both input and output types). e.g. [{"name": "prediction", "type": "double"}], or "long" for class labels, "string" for text labels.`}
             >
               <textarea
@@ -811,6 +826,7 @@ export function DeployModel({
           <>
             <Section
               title="Sample input"
+              required
               hint={`The exact request your model accepts — paste the real serving payload, e.g. {"instances": ["Pregnancy Test", "EKG"]}.`}
             >
               <textarea
@@ -823,6 +839,7 @@ export function DeployModel({
 
             <Section
               title="Sample output"
+              required
               hint={`The matching response, e.g. {"predictions": ["non-invasive", "non-invasive"]}. Used to infer the model's output signature.`}
             >
               <textarea
@@ -862,6 +879,7 @@ export function DeployModel({
 
         <Section
           title="UC Model name"
+          required
           hint="Unity Catalog three-level name the model will be registered under."
         >
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
@@ -932,6 +950,7 @@ export function DeployModel({
 
         <Section
           title="Compute"
+          required
           hint="Serving compute for this deployment — compute type, size, and idle scale-down."
         >
           <div className="space-y-4 rounded-md border border-input p-4">
