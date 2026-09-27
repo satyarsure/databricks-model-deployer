@@ -376,12 +376,10 @@ export function DeployModel({
       { label: 'A', source: 'artifact', type: 'uc_volume', path: '', version: '', traffic_percent: 100 },
     ],
   );
-  const [inputSchemaText, setInputSchemaText] = useState(
-    pf?.inputSchemaText ?? '[\n  { "name": "feature_1", "type": "double" }\n]',
-  );
-  const [outputSchemaText, setOutputSchemaText] = useState(
-    pf?.outputSchemaText ?? '[\n  { "name": "prediction", "type": "double" }\n]',
-  );
+  // Schema/sample boxes start EMPTY (showing a ghost placeholder) on a fresh deploy, so the example
+  // isn't mistaken for real input and the required-field validation applies. Prefill/resume fills them.
+  const [inputSchemaText, setInputSchemaText] = useState(pf?.inputSchemaText ?? '');
+  const [outputSchemaText, setOutputSchemaText] = useState(pf?.outputSchemaText ?? '');
   // Contract can be defined by a columnar SCHEMA (default) or by a real SAMPLE input/output
   // (preferred for text / JSON / tensor models like {"instances": [...]}). The deploy job infers
   // the MLflow signature from the sample, so it matches the model's native serving contract.
@@ -391,12 +389,8 @@ export function DeployModel({
   // The draft this form is editing (if resumed or already saved once) — so Save updates it in place.
   const [savedDraftId, setSavedDraftId] = useState<string | undefined>(draftId);
   const [draftMsg, setDraftMsg] = useState('');
-  const [sampleInputText, setSampleInputText] = useState(
-    pf?.sampleInputText ?? '{\n  "instances": ["example one", "example two"]\n}',
-  );
-  const [sampleOutputText, setSampleOutputText] = useState(
-    pf?.sampleOutputText ?? '{\n  "predictions": ["label one", "label two"]\n}',
-  );
+  const [sampleInputText, setSampleInputText] = useState(pf?.sampleInputText ?? '');
+  const [sampleOutputText, setSampleOutputText] = useState(pf?.sampleOutputText ?? '');
   const [experimentName, setExperimentName] = useState(pf?.experimentName ?? '');
   const [evalDataset, setEvalDataset] = useState(pf?.evalDataset ?? '');
   const [ucCatalog, setUcCatalog] = useState(pf?.ucCatalog ?? '');
@@ -808,7 +802,7 @@ export function DeployModel({
             >
               <textarea
                 className={`${inputCls} min-h-[96px] font-mono text-xs`}
-                placeholder='[{"name": "f1", "type": "double"}]'
+                placeholder={'[\n  { "name": "feature_1", "type": "double" }\n]'}
                 value={inputSchemaText}
                 onChange={(e) => setInputSchemaText(e.target.value)}
               />
@@ -821,7 +815,7 @@ export function DeployModel({
             >
               <textarea
                 className={`${inputCls} min-h-[96px] font-mono text-xs`}
-                placeholder='[{"name": "prediction", "type": "double"}]'
+                placeholder={'[\n  { "name": "prediction", "type": "double" }\n]'}
                 value={outputSchemaText}
                 onChange={(e) => setOutputSchemaText(e.target.value)}
               />
@@ -836,7 +830,7 @@ export function DeployModel({
             >
               <textarea
                 className={`${inputCls} min-h-[96px] font-mono text-xs`}
-                placeholder='{"instances": ["Pregnancy Test", "EKG"]}'
+                placeholder={'{\n  "instances": ["Pregnancy Test", "EKG"]\n}'}
                 value={sampleInputText}
                 onChange={(e) => setSampleInputText(e.target.value)}
               />
@@ -849,7 +843,7 @@ export function DeployModel({
             >
               <textarea
                 className={`${inputCls} min-h-[96px] font-mono text-xs`}
-                placeholder='{"predictions": ["non-invasive", "non-invasive"]}'
+                placeholder={'{\n  "predictions": ["non-invasive", "non-invasive"]\n}'}
                 value={sampleOutputText}
                 onChange={(e) => setSampleOutputText(e.target.value)}
               />
