@@ -376,7 +376,9 @@ export function DeployModel({
       { label: 'A', source: 'artifact', type: 'uc_volume', path: '', version: '', traffic_percent: 100 },
     ],
   );
-  const [inputSchemaText, setInputSchemaText] = useState(pf?.inputSchemaText ?? '[]');
+  const [inputSchemaText, setInputSchemaText] = useState(
+    pf?.inputSchemaText ?? '[\n  { "name": "feature_1", "type": "double" }\n]',
+  );
   const [outputSchemaText, setOutputSchemaText] = useState(
     pf?.outputSchemaText ?? '[\n  { "name": "prediction", "type": "double" }\n]',
   );
@@ -461,10 +463,11 @@ export function DeployModel({
         }
       }
     } else {
-      const inCheck = parseSchema(inputSchemaText, false);
+      // Both input AND output schemas are required in schema mode — Unity Catalog rejects a model
+      // whose signature lacks either input or output type specs, so an empty input schema would
+      // fail registration.
+      const inCheck = parseSchema(inputSchemaText, true);
       if (!inCheck.ok) return `Input schema ${inCheck.error}.`;
-      // Output schema is required in schema mode — Unity Catalog rejects models with no signature
-      // (needs input + output type specs). Give the model's real output type.
       const outCheck = parseSchema(outputSchemaText, true);
       if (!outCheck.ok) return `Output schema ${outCheck.error}.`;
     }
@@ -494,7 +497,7 @@ export function DeployModel({
     }
     setSubmitting(true);
     try {
-      const inParsed = parseSchema(inputSchemaText, false);
+      const inParsed = parseSchema(inputSchemaText, true);
       const outParsed = parseSchema(outputSchemaText, true);
       if (contractMode === 'schema' && (!inParsed.ok || !outParsed.ok)) {
         setError('Input/Output schema must be valid JSON.');
@@ -800,7 +803,8 @@ export function DeployModel({
           <>
             <Section
               title="Input Schema"
-              hint={`JSON array of the model's input columns, e.g. [{"name": "f1", "type": "double"}]. For a text model use a single string column, e.g. [{"name": "text", "type": "string"}].`}
+              required
+              hint={`Required — JSON array of the model's input columns, e.g. [{"name": "f1", "type": "double"}]. (For text/JSON models, use the "Sample input / output" contract instead.)`}
             >
               <textarea
                 className={`${inputCls} min-h-[96px] font-mono text-xs`}
