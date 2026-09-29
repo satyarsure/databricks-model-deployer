@@ -12,7 +12,9 @@ Model Deployer is a Databricks App that turns a trained model artifact into a li
 and click deploy. Behind the scenes it runs a three-stage pipeline:
 
 1. **Wrapper** — loads your artifact, wraps it as an MLflow model with a signature built from your
-   input/output schema, and registers it as a new version in Unity Catalog.
+   input/output schema, and registers it as a new version in Unity Catalog. A **full MLflow model**
+   (from a workspace model registry, or an MLflow model folder) is registered **as-is** instead,
+   keeping its own code, files, and packages (section 6).
 2. **Validator** — loads the registered model, runs a smoke-test prediction, and (optionally)
    scores it against an evaluation dataset with `mlflow.evaluate`.
 3. **Deployer** — creates or updates the Model Serving endpoint (traffic split, compute,
@@ -53,13 +55,17 @@ The app has two tabs:
 That's it. A typical CPU/SMALL deployment takes a few minutes (most of it is the serving endpoint
 becoming ready).
 
+> **How many at once?** Up to **5 deployments** (your administrator can change this) run at the same
+> time. Any more wait in a queue and start automatically as running ones finish — you don't need to
+> resubmit.
+
 # 5. Field reference
 
 | Field | Required | What to enter |
 |---|---|---|
 | **Model Name** | Yes | A friendly name for the deployment (e.g. `house-price-regressor`). Shown on the board. |
 | **Description** | No | Free text describing the model. |
-| **Artifact** | Yes | Where the model file lives — a **UC Volume** path or an **S3** path (see section 6). For A/B tests you can add more than one, or reference an existing version. |
+| **Artifact** | Yes | Where the model lives — a **UC Volume** path, an **S3** path, or a **Workspace registry** model (see section 6). For A/B tests you can add more than one, or reference an existing version. |
 | **Model contract** | Yes | How you describe inputs/outputs (see section 7): **Columnar schema** (tabular models) or **Sample input / output** (text / JSON / tensor models). |
 | **Input / Output schema** *(schema mode)* | — | JSON arrays of the model's columns (see section 7). |
 | **Sample input / output** *(sample mode)* | — | A real request/response example, e.g. `{"instances": [...]}` / `{"predictions": [...]}` (see section 7). |
@@ -79,14 +85,41 @@ becoming ready).
 
 Each deployment has one or more **variants**. A variant is one of:
 
-- **New artifact** — a model file that gets wrapped and registered as a new version. Choose the
-  source type and enter the path:
-  - **UC Volume**: `/Volumes/<catalog>/<schema>/<volume>/path/to/model.pkl`
-  - **S3**: `s3://bucket/path/to/model.pkl`
+- **New artifact** — choose where it comes from:
+
+  | Source | What to enter | What happens |
+  |---|---|---|
+  | **UC Volume** — a model file | `/Volumes/<catalog>/<schema>/<volume>/path/to/model.pkl` | Loaded, wrapped, and registered as a new version. |
+  | **UC Volume** — an MLflow model folder | `/Volumes/<catalog>/<schema>/<volume>/path/to/model_folder` (the folder that contains the `MLmodel` file) | Registered **as-is** (see below). |
+  | **S3** | `s3://bucket/path/to/model.pkl` | Loaded, wrapped, and registered as a new version. |
+  | **Workspace registry** | **Source workspace URL** (leave blank for this workspace), **Registered model name**, and **Version or stage** (a number, `Production`, `Staging`, or `latest`) | The model version is copied into Unity Catalog **as-is** (see below). |
+
 - **Existing version** — an already-registered version of the same Unity Catalog model. It is
   served **as-is** (no re-wrapping). Used for champion-vs-challenger A/B tests (section 13).
 
-Supported artifact formats are standard pickled model files (e.g. scikit-learn, XGBoost, LightGBM).
+**Model files** must be standard pickled models (e.g. scikit-learn, XGBoost, LightGBM) that work
+**on their own**: everything the model needs to go from your input to its answer must be inside the
+one file (for example a scikit-learn `Pipeline` that includes its vectorizer). A file that only holds
+the last step — say a classifier that expects an already-converted number vector — will deploy, but
+it can't answer real requests.
+
+**Registered as-is (full MLflow models).** Some models need more than one file: a custom Python
+package, mapping/lookup files, or extra libraries such as `transformers`. Those are saved as an
+**MLflow model** (a folder with an `MLmodel` file, `code/`, `artifacts/`, and `requirements.txt`),
+usually in a workspace model registry. Choose **Workspace registry** (or point a UC Volume path at
+the folder): the deployer copies the whole model into Unity Catalog unchanged — code, files, and its
+own package list — so Model Serving builds exactly the environment the model was built for. You still
+enter the **model contract** (section 7); it becomes the model's signature, which Unity Catalog
+requires (the old workspace registry didn't). The new version also records where it came from
+(source workspace, model, version, and run) and the source run's parameters and metrics.
+
+> **Another workspace?** Importing from a *different* workspace works only after an administrator
+> has connected that workspace (see INSTALL.md §6f). Until then the deployment fails at the wrapper
+> stage with a message saying so. Importing from **this** workspace needs no setup.
+
+**A file on your computer?** Uploading straight from your computer isn't supported. It's two steps:
+(1) upload the file to a UC Volume (Catalog Explorer → your volume → **Upload to this volume**), then
+(2) choose **UC Volume** here and enter its path.
 
 # 7. Defining the model contract (schema **or** sample)
 
@@ -236,6 +269,10 @@ You can serve two variants of the same model on one endpoint with a traffic spli
 3. Deploy. The existing version is served as-is (not re-wrapped); only the challenger is registered
    as a new version.
 
+> If an earlier deployment of the same endpoint is **still rolling out** when you start an A/B test
+> (or a new version), the new deployment **waits for it to finish** before changing the endpoint,
+> instead of failing.
+
 # 15. Querying your deployed endpoint
 
 Once a row is **Complete**, click **Serving → Open** for the endpoint, or query it directly. Using
@@ -258,6 +295,11 @@ databricks serving-endpoints query <endpoint_name> \
 
 The endpoint name defaults to `<model>_endpoint`.
 
+After the endpoint is ready, the deployer sends it **one test request** built from your sample input
+(or a dummy row from your input schema) and shows the reply on the timeline as **endpoint check OK**
+or **endpoint check failed**. A failed check doesn't fail the deployment, but it means the served
+model didn't answer that request — look at the message before handing the endpoint to others.
+
 # 16. When a deployment fails
 
 If a deployment turns **Failed**, expand the row's lifecycle timeline — the last event is a red
@@ -266,11 +308,14 @@ If a deployment turns **Failed**, expand the row's lifecycle timeline — the la
 | Stage that failed | Common cause |
 |---|---|
 | **Wrapper** | The artifact couldn't be loaded (wrong path, not a model file, unpickling error), or (schema mode) the model couldn't be registered — Unity Catalog needs a valid signature. |
-| **Deployer** | The serving endpoint could not be created/updated (permissions, quota, or configuration). |
+| **Wrapper** *(Workspace registry)* | The model name/version doesn't exist or you can't read it; or the source workspace hasn't been connected by an administrator (the message names the missing setup). |
+| **Deployer** | The serving endpoint could not be created/updated (permissions, quota, or configuration). For an imported model, also check the endpoint's **build logs** — the model's own package list must install on Model Serving. |
 
 Note: the **validation smoke test is non-fatal** — if it can't exercise the model with the example
 (common for text/sample-mode models), it's noted on the timeline as a warning and the deployment
-**still proceeds to serving**. It won't, by itself, mark the deployment Failed.
+**still proceeds to serving**. It won't, by itself, mark the deployment Failed. Imported (as-is)
+models often **can't be loaded by the deployer itself**, because they bring packages the deployer
+doesn't have; the timeline says so, and the **endpoint check** (section 15) is the real test.
 
 Fix the underlying issue and deploy again. A failed deployment does **not** create an endpoint.
 
@@ -281,6 +326,9 @@ Fix the underlying issue and deploy again. A failed deployment does **not** crea
 - For **text / JSON / tensor** models, use **Sample input / output** mode instead of a schema, and
   make sure the artifact is a **complete pipeline** (e.g. vectorizer + classifier) that accepts the
   sample you paste.
+- If a model depends on a **custom package, mapping files, or extra libraries**, don't deploy its
+  bare `.pkl` — deploy the full MLflow model with **Workspace registry** (or its MLflow folder), and
+  paste a sample exactly as the original model was called.
 - Use **`double`** for continuous features and regression outputs; use **`long`** for class labels
   so the validator scores it as a classifier.
 - Leave **Experiment** and **Serverless usage policy** blank unless you specifically need to

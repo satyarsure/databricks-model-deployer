@@ -2,7 +2,11 @@ resources:
   jobs:
     deploy_model_job:
       name: mlops_deploy_model_job
-      max_concurrent_runs: 5
+      # Deployments beyond this many wait in the queue (instead of being skipped) and start as
+      # running ones finish. Set per environment via var.max_concurrent_deployments.
+      max_concurrent_runs: ${var.max_concurrent_deployments}
+      queue:
+        enabled: true
 
       # Serverless usage policy + the full governance/chargeback tag map. The notebook reads these
       # same job tags at runtime (via the SDK) and applies them to every serving endpoint it creates,
@@ -35,6 +39,8 @@ resources:
               pg_endpoint: projects/${var.lakebase_project}/branches/${var.lakebase_branch_name}/endpoints/${var.lakebase_endpoint_name}
               pg_schema: ${var.pg_schema}
               app_sp: ${var.app_sp}
+              # Credentials scope for importing from other workspaces' model registries.
+              registry_secret_scope: ${var.source_registry_secret_scope}
 
       # Reproducible dependency set for serverless compute. environment_version pins the
       # Python runtime; dependencies install the exact versions from the bundled

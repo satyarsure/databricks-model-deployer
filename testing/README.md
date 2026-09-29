@@ -27,6 +27,12 @@ path, an A/B traffic split, and two failure paths — every stage of
    | `churn_eval.csv` | eval dataset (classifier) | includes the `churn` target column |
    | `credit_risk_eval.csv` | eval dataset (classifier) | includes the `risk_class` target column |
    | `not_a_model.txt` | (not a model) | used by the wrapper-failure test |
+   | `text_svm_mlflow/` | full MLflow model **folder**: custom `text_features` package + vocabulary file + LinearSVC | raw text → `"invasive"` / `"non-invasive"` (TC12) |
+   | `text_svm_bare.pkl` | the LinearSVC alone (expects a word-count vector) | used by the TC12 negative case |
+
+   It also registers the same full model as **`text_svm_legacy`** in the **workspace (legacy) model
+   registry** of the workspace it runs in, for the Workspace-registry source (TC12). If that workspace
+   has no legacy registry, it prints a note and skips it.
 
 2. **Fill in your environment values** (used throughout the cases below):
 
@@ -450,21 +456,22 @@ principals for a level in **one array** (a duplicated key like two `can_view` en
 Endpoint permissions (paste into the field):
 ```json
 {
-  "can_manage": ["greg.mara@databricks.com"],
-  "can_query": ["jeff.shmain@databricks.com"],
-  "can_view": ["usama.arif@databricks.com"]
+  "can_manage": ["<user-a>@example.com"],
+  "can_query": ["<user-b>@example.com"],
+  "can_view": ["<user-c>@example.com"]
 }
 ```
+(Use three real users of your workspace.)
 
-**Expected:** deployment completes; the endpoint's ACL contains greg → CAN_MANAGE, jeff → CAN_QUERY,
-usama → CAN_VIEW, plus **the deploying user → CAN_MANAGE** (added by default when not listed) and the
+**Expected:** deployment completes; the endpoint's ACL contains user-a → CAN_MANAGE, user-b →
+CAN_QUERY, user-c → CAN_VIEW, plus **the deploying user → CAN_MANAGE** (added by default when not listed) and the
 endpoint owner/creator → CAN_MANAGE. Applied as a merge (PATCH), so the owner and any existing grants
 are preserved; a permission failure is non-fatal (logged as a lifecycle note, deployment still completes).
 
 > **Honoring an explicit level for the submitter:** if you deploy *as* one of these users and list
 > that same user under `can_view`/`can_query`, the endpoint shows them at that level — the default
-> `CAN_MANAGE` applies only when the submitter isn't listed. (Verified: deploying as
-> `greg.mara@databricks.com` with greg under `can_view` yields greg → CAN_VIEW.)
+> `CAN_MANAGE` applies only when the submitter isn't listed. (Verified: deploying as user-a with
+> user-a under `can_view` yields user-a → CAN_VIEW.)
 
 **Verify the ACL:**
 ```bash
@@ -514,6 +521,56 @@ databricks serving-endpoints query protocol_text_clf_endpoint \
 ```
 On **Deployed Models**, the row records `contract_mode = sample`; clicking the model name to deploy a
 **new version** re-opens the form in **Sample** mode with the sample pre-filled.
+
+## TC12 — Model with its own package + files, imported AS-IS ⭐
+
+The shape of a legacy model whose `.pkl` is only the last step: `text_svm_legacy` turns raw text into
+a word-count vector with a **custom package** (`text_features`) and a **vocabulary file**, then runs a
+LinearSVC and maps class ids back to names. Deploying it as-is keeps all of that.
+
+**TC12a — from this workspace's model registry**
+
+| field | value |
+|---|---|
+| Model Name | `text-svm-import` |
+| Artifact | **Workspace registry** · Source workspace URL *(blank)* · Registered model name `text_svm_legacy` · Version `latest` |
+| **Model contract** | **Sample input / output** |
+| UC Model name | `<catalog>` · `<schema>` · `text_svm_import` |
+| Compute | CPU · SMALL · Scale-to-zero ON |
+
+Sample input: `{"instances": ["pregnancy test", "biopsy"]}` — Sample output: `{"predictions": ["non-invasive", "invasive"]}`
+
+**Expected:** the wrapper event reads *"variant A: registered text_svm_legacy vN from this workspace
+as-is as v1 (python …, mlflow …, 6 pip requirement(s))"*; the deployer ends with *"endpoint check OK:
+{"predictions": ["non-invasive", "invasive"]}"*. In Catalog Explorer the UC version carries the
+`source_*` tags, and its run shows the source run's params (`classifier`, `vocab_size`). Query:
+```bash
+databricks serving-endpoints query text_svm_import_endpoint \
+  --json '{"instances": ["ekg", "lumbar puncture"]}' --profile <PROFILE>
+# → {"predictions": ["non-invasive", "invasive"]}
+```
+
+**TC12b — the same model as an MLflow folder in a Volume:** as TC12a, but Artifact = **UC Volume** ·
+`/Volumes/<catalog>/<schema>/<volume>/test_models/text_svm_mlflow` and UC model `text_svm_folder`.
+Same expected result (the wrapper event names the folder path).
+
+**TC12c — negative: the bare classifier.** As TC12a, but Artifact = **UC Volume** ·
+`.../test_models/text_svm_bare.pkl` and UC model `text_svm_bare`. **Expected:** it registers and the
+endpoint comes up, but the deployer shows *"endpoint check failed"* — the bare SVM can't take text.
+This is the failure the as-is import avoids.
+
+**TC12d — another workspace (only after INSTALL §6f):** enter the other workspace's URL and a model
+that exists there. Before the admin setup, the wrapper fails with *"Importing from another workspace
+(…) is not enabled here"*; with the scope set but the secrets missing, *"No credentials for …"*
+naming the exact secret keys.
+
+## TC13 — A/B test while the champion is still rolling out
+
+1. Deploy a new version of `house_price_model` (TC7) and, **while it is still Deploying**, start an
+   A/B test from the model's earlier **Complete** row (TC4b).
+2. **Expected:** the A/B run's job output shows *"waiting for any in-progress update of
+   house_price_model_endpoint to finish"* and then *"updating …"* once the first finishes; it does
+   **not** fail with an "endpoint is being updated" error. Both rows end **Complete**.
 
 ## What to check in the UI (every case)
 

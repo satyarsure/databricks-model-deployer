@@ -15,10 +15,10 @@ on that machine — no dependency on any other environment.
 > | `<PROFILE>` | CLI profile for deploys | `client-prod` |
 > | `<OAUTH_PROFILE>` | CLI profile for reading app logs | `client-oauth` |
 > | `<CATALOG>` / `<SCHEMA>` | UC catalog/schema for **registered models** + the artifacts volume | `rnd_mlops` / `model_deployer` |
-> | `<BUDGET_POLICY_ID>` | Serverless budget (usage) policy for chargeback | `d894…506c` |
+> | `<BUDGET_POLICY_ID>` | Serverless budget (usage) policy for chargeback | `1a2b…9f0e` |
 > | `<APP_NAME>` | Databricks App name (≤26 chars, lowercase/hyphens) | `client-model-deployer` |
 > | `<ROOT_PATH>` | Workspace folder the bundles deploy under | `/Workspace/Users/you@client.com/model-deployer` |
-> | `<APP_SP_ID>` | The app's service-principal application id (created at app deploy) | `cb3a…6e1c` |
+> | `<APP_SP_ID>` | The app's service-principal application id (created at app deploy) | `4c5d…7e8f` |
 > | `<LB_PROJECT>` | Lakebase project id | `client-model-deployer-lb` |
 > | `<LB_BRANCH>` | Lakebase branch resource path | `projects/<LB_PROJECT>/branches/production` |
 > | `<LB_DATABASE>` | Lakebase database resource path | `<LB_BRANCH>/databases/databricks-postgres` |
@@ -263,6 +263,13 @@ targets:
 ```
 (`pg_database`, `pg_schema`, `lakebase_branch_name` (`production`), and `lakebase_endpoint_name`
 (`primary`) default sensibly — set them only if your Lakebase names differ.)
+
+Two optional variables:
+
+| Variable | Default | What it does |
+|---|---|---|
+| `max_concurrent_deployments` | `5` | Deployments that run at the same time. The job's **queue is enabled**, so extra deployments wait and start as running ones finish (they are not dropped). Raise it if users routinely queue; each running deployment uses its own serverless compute. |
+| `source_registry_secret_scope` | *(blank)* | Turns on importing from **other** workspaces' model registries — see §6f. Blank = off. |
 Deploy and capture the job id:
 ```bash
 cd deploy-job
@@ -351,6 +358,51 @@ cd governance && databricks bundle deploy -t dev --profile <PROFILE> && cd ..
 > can't drop them (verify `prevent_destroy` on your CLI; treat "don't `bundle destroy` prod" as the
 > real safeguard).
 
+### 6f. (Optional) Import from a workspace model registry
+
+The Deploy form's **Workspace registry** source copies a model version from a workspace (legacy)
+model registry into Unity Catalog **as-is** (its code, files, and pip requirements), so models that
+depend on a custom package or extra files keep working when served.
+
+**From this workspace** — no setup. The deploy job reads the model **as its run identity**, so that
+identity needs `CAN_READ` on the registered model.
+
+**From another workspace** — the deploy job's identity doesn't exist there (and the app's
+signed-in-user token only works in this workspace), so the job uses a credential you store once per
+source workspace. It uses MLflow's built-in cross-workspace registry access (`databricks://<scope>:<prefix>`),
+which reads two secrets:
+
+1. **In the source workspace**, create a **service principal** for this purpose and give it
+   `CAN_READ` on **only** the registered models to be migrated. Create a **personal access token
+   for that service principal** (this MLflow mechanism needs a token that lasts; OAuth access tokens
+   expire within an hour), with the shortest lifetime the migration allows, and note its expiry.
+2. **In this workspace**, create a secret scope (once) and let the deploy job's run identity read it:
+   ```bash
+   databricks secrets create-scope <SCOPE> --profile <PROFILE>
+   databricks secrets put-acl <SCOPE> <deploy-job-run-identity> READ --profile <PROFILE>
+   ```
+3. Store the source workspace's host and token under a **prefix** = the source host with every
+   character other than `a-z`, `0-9`, and `-` replaced by `-` (e.g. `adb-123.4.azuredatabricks.net`
+   → `adb-123-4-azuredatabricks-net`):
+   ```bash
+   databricks secrets put-secret <SCOPE> <prefix>-host  --string-value https://<source-host> --profile <PROFILE>
+   databricks secrets put-secret <SCOPE> <prefix>-token --profile <PROFILE>   # paste the token when prompted
+   ```
+4. Set `source_registry_secret_scope: <SCOPE>` in `deploy-job/values.local.yml` and redeploy the job.
+
+Users then enter `https://<source-host>` as the **Source workspace URL**. The job checks that the
+stored `<prefix>-host` matches the URL the user typed before using the token.
+
+> **Security.** Every app user who can deploy can import any model **the service principal** can
+> read — their own access in the source workspace is not checked. Keep the principal's grants limited
+> to the models being migrated, rotate the token before it expires, and remove the secrets when the
+> migration is done. The same applies to same-workspace imports: they use the job's run identity.
+
+**If the workspaces are in different regions,** the same setup works (it's plain HTTPS to the
+source workspace), but copying large models is slower. An alternative is to export the model to a
+UC Volume first (e.g. with the open-source `mlflow-export-import` tool), then deploy the exported
+MLflow model folder with the **UC Volume** source.
+
 ---
 
 ## 7. Verify
@@ -379,6 +431,9 @@ serving endpoint becomes READY. (Inspect Lakebase directly if needed:
 | Deploy job "Bad Request" on trigger | The deploy job must stay a **single** notebook task with `base_parameters` (the AppKit jobs plugin sends `notebook_params`, which a multi-task job rejects). Keep it as shipped. |
 | Endpoint description / budget policy not applied on update | Endpoint **tags are re-synced** on update, but `budget_policy_id` + `description` are **create-time only** on serving endpoints — to change them, delete + recreate the endpoint. |
 | Serving container fails to load the model | The served model's `pip_requirements` are pinned to wrap-time versions; a **user artifact** must be compatible with the pinned `scikit-learn`/framework in `deploy-job/requirements.txt`. |
+| Imported (Workspace registry / MLflow folder) model's endpoint fails to build | These keep the model's **own** requirements. Check the endpoint's build logs: very old models can pin a Python or package version Model Serving no longer installs — re-log the model with current versions in its source workspace, then import that version. |
+| Wrapper fails with "not enabled here" / "No credentials for …" on a Workspace registry import | Cross-workspace import isn't configured, or the secrets for that host are missing — §6f. The message names the scope and secret keys to create. |
+| Deployments stay "Queued" in the Jobs UI | More than `max_concurrent_deployments` were submitted; they start as running ones finish. Raise the variable (§5) if this is routine. |
 | SDK errors about `budget_policy_id` / workload-type enum in the job | `deploy-job/requirements.txt` pins `databricks-sdk`; don't downgrade. |
 | Deploy row never appears / stale after reload | The app polls Lakebase every few seconds while something is in progress; confirm the Lakebase endpoint is reachable and the app SP has `SELECT` on `<PG_SCHEMA>`. |
 

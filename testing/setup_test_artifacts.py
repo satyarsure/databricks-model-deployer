@@ -142,6 +142,86 @@ with open(f"{BASE}/not_a_model.txt", "w") as f:
 print("  saved", f"{BASE}/not_a_model.txt")
 
 # COMMAND ----------
+# 7) DEPENDENT text model (TC12) — the shape of a "bare classifier + custom package + mapping file"
+#    model: raw text → custom `text_features` package (reads a vocabulary mapping file) → fixed-
+#    length vector → LinearSVC → label ids decoded back to names. Written three ways:
+#      * test_models/text_svm_mlflow/  — a full MLflow model FOLDER (code + files + requirements)
+#      * "text_svm_legacy" in the WORKSPACE model registry (skipped if this workspace has none)
+#      * test_models/text_svm_bare.pkl — the bare classifier alone; expects the vector, not text,
+#        so it registers but can't answer text requests (the failure the as-is import fixes)
+#    No signature is logged, like a legacy-registry model — the Deploy form's contract supplies it.
+import sys, json, shutil, tempfile, cloudpickle, mlflow
+from sklearn.svm import LinearSVC
+
+pkg_root = tempfile.mkdtemp()
+os.makedirs(f"{pkg_root}/text_features")
+with open(f"{pkg_root}/text_features/__init__.py", "w") as f:
+    f.write('''import json
+import numpy as np
+
+def load_vocab(path):
+    with open(path) as f:
+        return json.load(f)
+
+def vectorize(texts, vocab):
+    X = np.zeros((len(texts), len(vocab["tokens"])))
+    for i, t in enumerate(texts):
+        for tok in str(t).lower().split():
+            j = vocab["tokens"].get(tok)
+            if j is not None:
+                X[i, j] += 1.0
+    return X
+''')
+sys.path.insert(0, pkg_root)
+import text_features
+
+texts = ["pregnancy test", "ekg", "blood pressure check", "vision test", "hearing test",
+         "biopsy", "surgery", "catheter insertion", "lumbar puncture", "endoscopy"]
+label_ids = [0, 0, 0, 0, 0, 1, 1, 1, 1, 1]
+vocab = {"tokens": {w: i for i, w in enumerate(sorted({w for t in texts for w in t.split()}))},
+         "labels": {"0": "non-invasive", "1": "invasive"}}
+tmp = tempfile.mkdtemp()
+vocab_path, svm_path = f"{tmp}/vocab.json", f"{tmp}/svm.pkl"
+with open(vocab_path, "w") as f:
+    json.dump(vocab, f)
+svm = LinearSVC().fit(text_features.vectorize(texts, vocab), label_ids)
+joblib.dump(svm, svm_path)
+save(svm, "text_svm_bare.pkl")
+
+class TextSvm(mlflow.pyfunc.PythonModel):
+    def load_context(self, context):
+        import joblib, text_features
+        self.tf = text_features
+        self.vocab = text_features.load_vocab(context.artifacts["vocab"])
+        self.svm = joblib.load(context.artifacts["svm"])
+
+    def predict(self, context, model_input, params=None):
+        texts = model_input.iloc[:, 0].tolist() if hasattr(model_input, "iloc") else list(model_input)
+        ids = self.svm.predict(self.tf.vectorize(texts, self.vocab))
+        return [self.vocab["labels"][str(int(i))] for i in ids]
+
+text_model = dict(
+    python_model=TextSvm(), artifacts={"svm": svm_path, "vocab": vocab_path},
+    code_paths=[f"{pkg_root}/text_features"],
+    pip_requirements=[f"mlflow=={mlflow.__version__}", "scikit-learn==1.4.2", "joblib==1.4.2",
+                      "numpy==1.26.4", "pandas==2.2.2", f"cloudpickle=={cloudpickle.__version__}"],
+)
+mlflow_dir = f"{BASE}/text_svm_mlflow"
+shutil.rmtree(mlflow_dir, ignore_errors=True)
+mlflow.pyfunc.save_model(path=mlflow_dir, **text_model)
+saved.append(mlflow_dir + "/")
+print("  saved", mlflow_dir + "/")
+
+try:
+    mlflow.set_registry_uri("databricks")  # the WORKSPACE (legacy) registry, not Unity Catalog
+    with mlflow.start_run(run_name="text_svm_legacy"):
+        mlflow.log_params({"classifier": "LinearSVC", "vocab_size": len(vocab["tokens"])})
+        mlflow.pyfunc.log_model("model", registered_model_name="text_svm_legacy", **text_model)
+    print("  registered text_svm_legacy in the WORKSPACE model registry")
+except Exception as e:
+    print(f"  workspace model registry not available here ({e}) — use the Volume folder for TC12")
+
+# COMMAND ----------
 print("\nDONE. Artifacts written:")
 for p in saved:
     print(" ", p)

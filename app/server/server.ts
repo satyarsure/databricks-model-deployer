@@ -12,15 +12,24 @@ const fieldSchema = z.object({
 });
 
 // A variant is either a NEW artifact (S3/UC Volume path, wrapped+registered as a new
-// version) or an EXISTING already-registered version of the same UC model (referenced
-// as-is for a champion-vs-challenger A/B test — no re-wrap).
+// version; or a workspace-registry model version, imported as-is) or an EXISTING
+// already-registered version of the same UC model (referenced as-is for a
+// champion-vs-challenger A/B test — no re-wrap).
+const REGISTRY_VERSION = /^(\d+|production|staging|latest)$/i;
+// Blank = this workspace; otherwise a workspace host, with or without https://.
+const WORKSPACE_URL = /^(https:\/\/)?[A-Za-z0-9.-]+(:\d+)?\/?$/;
+
 const artifactSchema = z
   .object({
     label: z.string().optional(),
     source: z.enum(['artifact', 'existing']).default('artifact'),
-    type: z.enum(['s3', 'uc_volume']).optional(),
+    type: z.enum(['s3', 'uc_volume', 'workspace_registry']).optional(),
     path: z.string().optional(),
     version: z.union([z.number(), z.string()]).optional(),
+    // type === 'workspace_registry': where the (legacy) registered model lives.
+    source_workspace_url: z.string().optional(),
+    source_model_name: z.string().optional(),
+    source_model_version: z.string().optional(),
     traffic_percent: z.number().min(0).max(100).optional(),
   })
   .superRefine((a, ctx) => {
@@ -47,7 +56,29 @@ const artifactSchema = z
           message: 'artifact variant needs a type',
           path: ['type'],
         });
-      if (!a.path || !a.path.trim())
+      if (a.type === 'workspace_registry') {
+        const name = (a.source_model_name ?? '').trim();
+        // The job looks the model up with a registry filter string, so no quotes in the name.
+        if (!name || /['"]/.test(name))
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: 'workspace-registry variant needs a model name (no quotes)',
+            path: ['source_model_name'],
+          });
+        if (!REGISTRY_VERSION.test((a.source_model_version ?? '').trim()))
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: 'workspace-registry version must be a number, Production, Staging or latest',
+            path: ['source_model_version'],
+          });
+        const url = (a.source_workspace_url ?? '').trim();
+        if (url && !WORKSPACE_URL.test(url))
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: 'source workspace must be a workspace URL (https://<host>) or blank',
+            path: ['source_workspace_url'],
+          });
+      } else if (!a.path || !a.path.trim())
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           message: 'artifact variant needs a path',

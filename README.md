@@ -1,8 +1,9 @@
 # databricks-model-deployer
 
 A Databricks App (React/AppKit) that lets users hand in an external model artifact from **S3** or a
-**Unity Catalog Volume** and publish it to **Databricks Model Serving** — reusing the MLflow
-deployment pattern from Genesis Workbench.
+**Unity Catalog Volume** — or a model version from a **workspace (legacy) model registry** — and
+publish it to **Databricks Model Serving**, reusing the MLflow deployment pattern from Genesis
+Workbench.
 
 A parameterized workflow job wraps the artifact as an MLflow **pyfunc**, registers it to **Unity
 Catalog**, validates it, and creates/updates a **serving endpoint** (A/B traffic split, CPU/GPU
@@ -29,11 +30,15 @@ React/AppKit app
 Deploy job (DABs, serverless) — one notebook, three stages:
    Wrapper    → load artifact(s), wrap as MLflow pyfunc, build the SIGNATURE (from a columnar schema,
                 OR inferred from a sample input/output — see "Model contract" below), register each
-                new-artifact variant to UC (a variant may instead reference an existing version)
+                new-artifact variant to UC (a variant may instead reference an existing version).
+                A full MLflow model (workspace registry / MLflow folder) is registered AS-IS — see
+                "Artifact sources" below
    Validator  → load the registered pyfunc, smoke-test predict (non-fatal — surfaced on the timeline
                 but never blocks serving), optional mlflow.evaluate vs an eval dataset
    Deployer   → create/update the serving endpoint (traffic split, compute, scale-to-zero, tags,
-                budget policy, inference tables, access permissions); set the UC @champion alias
+                budget policy, inference tables, access permissions; waits out an in-progress
+                update of the same endpoint); set the UC @champion alias; query the live endpoint
+                once with the deployment's example ("endpoint check" on the timeline, non-fatal)
    (every stage writes status to Lakebase model_deployments and appends to model_lifecycle_events)
 
 Lakebase Postgres (schema `model_deployer`) — the app's operational store:
@@ -51,8 +56,9 @@ Lakebase Postgres (schema `model_deployer`) — the app's operational store:
 | `app/client/src/lib/useApiQuery.ts` | Small client hook that fetches the app's JSON routes (replaces `useAnalyticsQuery`). |
 | `deploy-job/` | The DABs bundle for the deploy workflow job (`src/notebooks/deploy_model.py`). Writes status/lifecycle to Lakebase Postgres. |
 | `deploy-job/requirements.txt` | Pinned dependency set for the job's serverless environment (includes `psycopg`). |
-| `governance/` | Optional DABs bundle that declaratively creates the **UC schema + `artifacts` volume** (where models are registered and artifacts live). The app's data lives in Lakebase, granted automatically by the job — see [INSTALL.md](INSTALL.md) §6f. |
+| `governance/` | Optional DABs bundle that declaratively creates the **UC schema + `artifacts` volume** (where models are registered and artifacts live). The app's data lives in Lakebase, granted automatically by the job — see [INSTALL.md](INSTALL.md) §6e. |
 | `testing/` | Manual-testing fixtures (`setup_test_artifacts.py`) and guide (`README.md`). |
+| `docs/` | End-user guide (`Model_Deployer_User_Guide.md`) and the operations / support runbook (`Operations_Runbook.md`). |
 | `Images/` | UI mockups. |
 
 ## Reproducible dependencies (version locking)
@@ -68,6 +74,8 @@ a run or drift predictions:
   versions actually in use at wrap time** (`mlflow=={version}`, `scikit-learn==…`, etc.). Model
   Serving rebuilds the container from these requirements (including on scale-to-zero cold starts),
   so the serving environment always matches the versions the artifact was loaded/pickled with.
+  **Exception:** a model registered **as-is** (see "Artifact sources") keeps its **own**
+  requirements — they describe the environment it was built for.
 
 Keep `testing/setup_test_artifacts.py` pinned to the same core versions as `requirements.txt` so
 fixture pickles load without a version-mismatch warning. Note: a **user-supplied** artifact must be
@@ -118,6 +126,27 @@ handed a 1-D list of strings (not a DataFrame) and 1-D predictions are returned 
 (`{"predictions": [...]}`), matching a text classifier's native contract. Whichever mode you use, a
 signature is always produced — you can't register to UC with none.
 
+## Artifact sources
+
+| Source (Deploy form) | Handled as |
+|---|---|
+| **UC Volume** / **S3** — a single model file (`.pkl`, joblib) | Loaded, wrapped in the generic pyfunc, registered with pinned requirements. |
+| **UC Volume** — an MLflow model folder (contains `MLmodel`) | Registered **as-is**. |
+| **Workspace registry** — workspace URL (blank = this one) + model name + version/stage | Downloaded from that registry, registered **as-is**. Another workspace needs one-time admin setup ([INSTALL.md](INSTALL.md) §6f). |
+
+**As-is** means the MLflow model folder is logged to a run unchanged — its `code/` (e.g. a custom
+featurizer package), `artifacts/` (e.g. mapping files) and `requirements.txt` (e.g. `transformers`)
+are kept — and registered to UC. Only the **signature** is written, from the deployment's contract:
+UC requires one and the legacy registry never did, so the contract stays mandatory. Re-wrapping such
+a model instead would drop its code and packages: it would register but fail (or mis-predict) when
+served. The new UC version is tagged with its provenance (`source_type`, `source_workspace`,
+`source_model`, `source_version`, `source_run_id`), and the import run copies the source run's
+params, metrics, training-code location and dataset inputs, so the training record carries over.
+
+Because an as-is model brings packages the deploy job doesn't have, the **validator may be unable to
+load it**; that is noted on the timeline (non-fatal) and the **endpoint check** — one real request to
+the served model after deploy — is the end-to-end test.
+
 ## Configuration (no environment-specific values are committed)
 
 All bundles read a **gitignored `values.local.yml`** (merged via each bundle's `include`). Copy the
@@ -126,7 +155,7 @@ examples and fill them in:
 ```bash
 cp deploy-job/values.local.example.yml deploy-job/values.local.yml
 cp app/values.local.example.yml        app/values.local.yml
-# governance/ is optional (see INSTALL §6f):
+# governance/ is optional (see INSTALL §6e):
 # cp governance/values.local.example.yml governance/values.local.yml
 ```
 
