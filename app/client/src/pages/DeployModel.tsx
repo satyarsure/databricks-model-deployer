@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useMemo, useState, type ReactNode } from 'react';
 import { Button, Label } from '@databricks/appkit-ui/react';
 import { Plus, Trash2, Save, Info, Rocket } from 'lucide-react';
 import { useApiQuery } from '../lib/useApiQuery';
@@ -408,26 +408,6 @@ export function DeployModel({
   const [error, setError] = useState<string | null>(null);
   const [ok, setOk] = useState<string | null>(null);
 
-  // Pre-fill Experiment + Serverless usage policy with the environment's configured defaults (read
-  // from the deploy job). Only fills a field that's still empty, so a prefill/resumed value or the
-  // user's own typing is never overwritten.
-  useEffect(() => {
-    let cancelled = false;
-    fetch('/api/config')
-      .then((r) => r.json())
-      .then((cfg: { default_experiment?: string; default_policy?: string }) => {
-        if (cancelled) return;
-        const exp = cfg.default_experiment;
-        const pol = cfg.default_policy;
-        if (exp) setExperimentName((prev) => prev || exp);
-        if (pol) setUsagePolicy((prev) => prev || pol);
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
   const trafficTotal = useMemo(
     () => artifacts.reduce((s, a) => s + (Number(a.traffic_percent) || 0), 0),
     [artifacts],
@@ -485,9 +465,8 @@ export function DeployModel({
       const outCheck = parseSchema(outputSchemaText, true);
       if (!outCheck.ok) return `Output schema ${outCheck.error}.`;
     }
-    // Experiment is required (pre-filled with the environment default, editable). Serverless usage
-    // policy stays optional — also pre-filled with the default, but blank still falls back to it.
-    if (!experimentName.trim()) return 'Experiment name is required.';
+    // Experiment and serverless usage policy are optional. Left blank, the deploy job logs to
+    // "<configured experiment base>/<model name>" and uses the configured serverless policy.
     if (!ucCatalog.trim() || !ucSchema.trim() || !ucModel.trim())
       return 'UC catalog, schema, and model are all required.';
     try {
@@ -874,8 +853,7 @@ export function DeployModel({
 
         <Section
           title="Experiment name"
-          required
-          hint="Required. Pre-filled with the environment's configured default MLflow experiment — edit it to log elsewhere."
+          hint="Optional — leave blank to log to the configured experiment folder as <experiment base>/<model name>. Enter a full path to override."
         >
           <input
             className={inputCls + lockedCls}
@@ -939,7 +917,7 @@ export function DeployModel({
 
         <Section
           title="Serverless usage policy"
-          hint="Budget/usage policy ID applied to the serving endpoint. Pre-filled with the environment's configured default — edit it to use a different policy. (Blank still falls back to the environment default.)"
+          hint="Optional — budget/usage policy ID for the serving endpoint. Leave blank to use the environment's configured policy (set at deployment). Enter an ID to override."
         >
           <input
             className={inputCls}

@@ -84,9 +84,13 @@ def _job_tags():
 # lifecycle rows now live in Lakebase Postgres, not Delta.
 spec = json.loads(dbutils.widgets.get("deploy_spec"))
 deployment_id = int(dbutils.widgets.get("deployment_id"))
-# Resolve deploy-time settings: the form value wins, else the bundle default (var.experiment /
-# var.budget_policy_id). Recorded on the status row and used by the wrapper/deployer stages.
-EXPERIMENT_RESOLVED = (spec.get("experiment_name") or "").strip() or EXPERIMENT_DEFAULT
+# Resolve deploy-time settings: the form value wins. When the form leaves Experiment blank, log to
+# "<configured experiment base>/<model name>" (base = var.experiment); the policy falls back to
+# var.budget_policy_id. Recorded on the status row and used by the wrapper/deployer stages.
+_exp = (spec.get("experiment_name") or "").strip()
+if not _exp and EXPERIMENT_DEFAULT:
+    _exp = EXPERIMENT_DEFAULT.rstrip("/") + "/" + (str(spec.get("name") or "model").strip() or "model")
+EXPERIMENT_RESOLVED = _exp
 POLICY_RESOLVED = (spec.get("serverless_usage_policy") or "").strip() or SERVERLESS_POLICY_DEFAULT
 try:
     run_id = str(dbutils.notebook.entry_point.getDbutils().notebook().getContext().jobId().get())
@@ -337,20 +341,6 @@ def _pg_init():
     """)
     _pg_exec(f'CREATE INDEX IF NOT EXISTS ix_drafts_owner '
              f'ON {PG_SCHEMA}.model_deployment_drafts (owner, updated_at)')
-    # Small key/value table of the environment's deploy-time defaults, so the app's Deploy form can
-    # pre-fill Experiment + Serverless usage policy with the configured values (read via Lakebase —
-    # there's no clean way to pass the deploy-job's bundle vars into the app runtime otherwise).
-    _pg_exec(f"""
-        CREATE TABLE IF NOT EXISTS {PG_SCHEMA}.model_deployer_config (
-          key TEXT PRIMARY KEY, value TEXT, updated_at TIMESTAMPTZ
-        )
-    """)
-    for _k, _v in (("experiment", EXPERIMENT_DEFAULT), ("serverless_policy", SERVERLESS_POLICY_DEFAULT)):
-        _pg_exec(
-            f'INSERT INTO {PG_SCHEMA}.model_deployer_config (key, value, updated_at) '
-            f'VALUES (%s, %s, now()) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()',
-            (_k, _v),
-        )
     if APP_SP:
         # SELECT so the app reads the tables; INSERT so the app server can write the initial
         # "submitted" record + lifecycle event at deploy-submit time (before this job cold-starts).
