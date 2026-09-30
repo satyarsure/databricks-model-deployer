@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { Button, Label } from '@databricks/appkit-ui/react';
 import { Plus, Trash2, Save, Info, Rocket } from 'lucide-react';
 import { useApiQuery } from '../lib/useApiQuery';
@@ -408,6 +408,42 @@ export function DeployModel({
   const [error, setError] = useState<string | null>(null);
   const [ok, setOk] = useState<string | null>(null);
 
+  // Environment defaults (from /api/config): the experiment BASE folder and the serverless policy.
+  // Experiment is shown as "<base>/<model name>" and stays in sync with Model Name until the user
+  // edits it; the policy is pre-filled with the configured value. A prefill/draft value counts as
+  // "already set by the user", so we don't override it.
+  const [experimentBase, setExperimentBase] = useState('');
+  const [experimentTouched, setExperimentTouched] = useState(!!pf?.experimentName);
+  const [policyTouched, setPolicyTouched] = useState(!!pf?.usagePolicy);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/config')
+      .then((r) => r.json())
+      .then((cfg: { experiment_base?: string; default_policy?: string }) => {
+        if (cancelled) return;
+        if (cfg.experiment_base) setExperimentBase(cfg.experiment_base);
+        const pol = cfg.default_policy;
+        if (pol) setUsagePolicy((prev) => (policyTouched ? prev : prev || pol));
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Keep Experiment = "<base>/<model name>" until the user edits it manually.
+  const derivedExperiment = experimentBase
+    ? name.trim()
+      ? `${experimentBase.replace(/\/+$/, '')}/${name.trim()}`
+      : experimentBase
+    : '';
+  useEffect(() => {
+    if (!experimentTouched) setExperimentName(derivedExperiment);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [derivedExperiment, experimentTouched]);
+
   const trafficTotal = useMemo(
     () => artifacts.reduce((s, a) => s + (Number(a.traffic_percent) || 0), 0),
     [artifacts],
@@ -465,8 +501,10 @@ export function DeployModel({
       const outCheck = parseSchema(outputSchemaText, true);
       if (!outCheck.ok) return `Output schema ${outCheck.error}.`;
     }
-    // Experiment and serverless usage policy are optional. Left blank, the deploy job logs to
-    // "<configured experiment base>/<model name>" and uses the configured serverless policy.
+    // Experiment and serverless usage policy are required (pre-filled with the environment
+    // defaults, but must resolve to a value — the config table may be empty on a fresh install).
+    if (!experimentName.trim()) return 'Experiment name is required.';
+    if (!usagePolicy.trim()) return 'Serverless usage policy is required.';
     if (!ucCatalog.trim() || !ucSchema.trim() || !ucModel.trim())
       return 'UC catalog, schema, and model are all required.';
     try {
@@ -853,14 +891,18 @@ export function DeployModel({
 
         <Section
           title="Experiment name"
-          hint="Optional — leave blank to log to the configured experiment folder as <experiment base>/<model name>. Enter a full path to override."
+          required
+          hint="Pre-filled with the configured experiment folder as <experiment base>/<model name>; it tracks the Model Name until you edit it. Enter a full path to override."
         >
           <input
             className={inputCls + lockedCls}
-            placeholder="(optional) /Users/you@company.com/experiments/my_experiment"
+            placeholder="/Users/you@company.com/experiments/my_experiment"
             value={experimentName}
             disabled={isNewVersion}
-            onChange={(e) => setExperimentName(e.target.value)}
+            onChange={(e) => {
+              setExperimentTouched(true);
+              setExperimentName(e.target.value);
+            }}
           />
         </Section>
 
@@ -917,13 +959,17 @@ export function DeployModel({
 
         <Section
           title="Serverless usage policy"
-          hint="Optional — budget/usage policy ID for the serving endpoint. Leave blank to use the environment's configured policy (set at deployment). Enter an ID to override."
+          required
+          hint="Budget/usage policy ID for the serving endpoint. Pre-filled with the environment's configured policy (set at deployment). Enter an ID to override."
         >
           <input
             className={inputCls}
-            placeholder="(optional) budget policy ID (e.g. 1a2b3c4d-…)"
+            placeholder="budget policy ID (e.g. 1a2b3c4d-…)"
             value={usagePolicy}
-            onChange={(e) => setUsagePolicy(e.target.value)}
+            onChange={(e) => {
+              setPolicyTouched(true);
+              setUsagePolicy(e.target.value);
+            }}
           />
         </Section>
 

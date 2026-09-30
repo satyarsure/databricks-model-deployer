@@ -140,6 +140,7 @@ createApp({
       const DEPLOYMENTS = `${PG_SCHEMA}.model_deployments`;
       const LIFECYCLE = `${PG_SCHEMA}.model_lifecycle_events`;
       const DRAFTS = `${PG_SCHEMA}.model_deployment_drafts`;
+      const CONFIG = `${PG_SCHEMA}.model_deployer_config`;
       // Signed-in user (used to scope drafts per user).
       const userEmail = (req: { headers: Record<string, unknown> }) =>
         (req.headers['x-forwarded-email'] as string) ||
@@ -265,6 +266,26 @@ createApp({
           (req.headers['x-forwarded-user'] as string) ||
           '';
         res.json({ email });
+      });
+
+      // Deploy-time defaults (experiment base + serverless policy), written by the deploy job's
+      // _pg_init, so the Deploy form can visibly pre-fill those fields. `experiment_base` is the
+      // configured experiment folder; the form shows Experiment as "<base>/<model name>".
+      app.get('/api/config', async (_req, res) => {
+        const empty = { experiment_base: '', default_policy: '' };
+        try {
+          const { rows } = await pgQuery(
+            `SELECT key, value FROM ${CONFIG} WHERE key IN ('experiment', 'serverless_policy')`,
+          );
+          const m: Record<string, string> = {};
+          for (const r of rows as Array<{ key: string; value: string | null }>)
+            m[r.key] = r.value ?? '';
+          res.json({ experiment_base: m.experiment ?? '', default_policy: m.serverless_policy ?? '' });
+        } catch (e) {
+          if (isEmpty(e)) { res.json(empty); return; }
+          console.warn('[lakebase] /api/config failed (form will not pre-fill):', pgErr(e).message ?? e);
+          res.json(empty);
+        }
       });
 
       // ---- Drafts: save a partially-filled Deploy form and resume it later --------------------

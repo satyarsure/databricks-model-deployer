@@ -341,6 +341,20 @@ def _pg_init():
     """)
     _pg_exec(f'CREATE INDEX IF NOT EXISTS ix_drafts_owner '
              f'ON {PG_SCHEMA}.model_deployment_drafts (owner, updated_at)')
+    # Key/value table of deploy-time defaults so the app's Deploy form can pre-fill (visibly) the
+    # Experiment (as <experiment base>/<model name>) and Serverless usage policy fields. `experiment`
+    # holds the configured experiment BASE (var.experiment); `serverless_policy` the policy id.
+    _pg_exec(f"""
+        CREATE TABLE IF NOT EXISTS {PG_SCHEMA}.model_deployer_config (
+          key TEXT PRIMARY KEY, value TEXT, updated_at TIMESTAMPTZ
+        )
+    """)
+    for _k, _v in (("experiment", EXPERIMENT_DEFAULT), ("serverless_policy", SERVERLESS_POLICY_DEFAULT)):
+        _pg_exec(
+            f'INSERT INTO {PG_SCHEMA}.model_deployer_config (key, value, updated_at) '
+            f'VALUES (%s, %s, now()) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()',
+            (_k, _v),
+        )
     if APP_SP:
         # SELECT so the app reads the tables; INSERT so the app server can write the initial
         # "submitted" record + lifecycle event at deploy-submit time (before this job cold-starts).
