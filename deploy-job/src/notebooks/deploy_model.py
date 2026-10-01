@@ -841,12 +841,18 @@ try:
         try:
             model = mlflow.pyfunc.load_model(model_uri)
         except Exception as le:
-            if not v.get("as_is"):
+            # A missing package (ModuleNotFoundError / ImportError) means the model needs libraries
+            # this deploy job's pinned env doesn't carry — e.g. torch/transformers for a model that
+            # embeds text with a transformer. That is NOT a deploy failure: Model Serving rebuilds the
+            # model's OWN environment from its requirements and validates it there (endpoint check
+            # below). So a missing-dependency load error is non-fatal for ANY model, not only ones
+            # flagged as_is (an as_is model that re-wraps heavy deps can still hit this). Other load
+            # errors on a re-wrapped (non-as_is) model are real and still fail.
+            missing_dep = isinstance(le, (ModuleNotFoundError, ImportError))
+            if not v.get("as_is") and not missing_dep:
                 raise
-            # Served as-is (imported / MLflow-folder / existing versions): the model brings its own
-            # packages, which this job's pinned environment may lack. Model Serving builds the
-            # model's OWN environment, so it's validated there instead (endpoint check below).
-            print(f"[validator] {model_uri} not loadable here (non-fatal): {le}")
+            print(f"[validator] {model_uri} not loadable in the deploy job env "
+                  f"(non-fatal — validated on the serving endpoint instead): {le}")
             log_event("validator", "IN_PROGRESS",
                       f"v{v['version']} needs packages the deploy job doesn't have; validating on "
                       f"the serving endpoint instead: {str(le)[:240]}",

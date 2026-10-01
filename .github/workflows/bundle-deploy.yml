@@ -1,0 +1,119 @@
+name: Bundle Deploy
+
+# Deploys the Databricks Asset Bundles to a chosen environment.
+#
+# Deploy order matters:
+#   1. governance (OPTIONAL) — creates/owns the UC schema + artifacts volume.
+#      Only run when DABs should OWN those UC objects (see governance/databricks.yml).
+#   2. deploy-job — the MLflow register + serving-endpoint deploy job.
+#   3. app         — the Databricks App. Its values.local.yml needs `job_id`, which is
+#      the deploy-job's id from the FIRST time step 2 ran (databricks jobs list).
+#      Put that id in APP_VALUES_LOCAL_YML for the target environment.
+#
+# Auth + values come from the GitHub Environment matching the chosen target
+# (dev / qa / prod). Each environment must define the same secrets listed in
+# bundle-ci.yml. Add required reviewers on the qa/prod environments to gate prod.
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment
+        type: choice
+        options: [dev, qa, prod]
+        default: dev
+      deploy_governance:
+        description: Also deploy the governance bundle (creates/owns UC schema + volume)
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths:
+      - "deploy-job/**"
+      - "app/**"
+      - "governance/**"
+
+concurrency:
+  # One deploy at a time per environment; don't cancel an in-flight deploy.
+  group: bundle-deploy-${{ github.event.inputs.environment || 'dev' }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  TARGET_ENV: ${{ github.event.inputs.environment || 'dev' }}
+
+jobs:
+  governance:
+    name: deploy governance
+    # Only on manual dispatch with the opt-in box checked.
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_governance == 'true' }}
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment || 'dev' }}
+    env:
+      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+      DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
+      DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Databricks CLI
+        uses: databricks/setup-cli@main
+      - name: Reconstruct values.local.yml
+        env:
+          VALUES: ${{ secrets.GOVERNANCE_VALUES_LOCAL_YML }}
+        run: |
+          [ -n "$VALUES" ] || { echo "::error::GOVERNANCE_VALUES_LOCAL_YML is empty"; exit 1; }
+          printf '%s' "$VALUES" > governance/values.local.yml
+      - name: databricks bundle deploy
+        working-directory: governance
+        run: databricks bundle deploy -t "$TARGET_ENV"
+
+  deploy-job:
+    name: deploy deploy-job
+    # governance is optional; only wait for it if it actually ran.
+    needs: [governance]
+    if: ${{ always() && (needs.governance.result == 'success' || needs.governance.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment || 'dev' }}
+    env:
+      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+      DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
+      DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Databricks CLI
+        uses: databricks/setup-cli@main
+      - name: Reconstruct values.local.yml
+        env:
+          VALUES: ${{ secrets.DEPLOY_JOB_VALUES_LOCAL_YML }}
+        run: |
+          [ -n "$VALUES" ] || { echo "::error::DEPLOY_JOB_VALUES_LOCAL_YML is empty"; exit 1; }
+          printf '%s' "$VALUES" > deploy-job/values.local.yml
+      - name: databricks bundle deploy
+        working-directory: deploy-job
+        run: databricks bundle deploy -t "$TARGET_ENV"
+
+  app:
+    name: deploy app
+    needs: [deploy-job]
+    if: ${{ always() && needs.deploy-job.result == 'success' }}
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment || 'dev' }}
+    env:
+      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+      DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
+      DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Databricks CLI
+        uses: databricks/setup-cli@main
+      - name: Reconstruct values.local.yml
+        env:
+          VALUES: ${{ secrets.APP_VALUES_LOCAL_YML }}
+        run: |
+          [ -n "$VALUES" ] || { echo "::error::APP_VALUES_LOCAL_YML is empty"; exit 1; }
+          printf '%s' "$VALUES" > app/values.local.yml
+      - name: databricks bundle deploy
+        working-directory: app
+        run: databricks bundle deploy -t "$TARGET_ENV"

@@ -201,3 +201,29 @@ project deliverables, and reference it in the tags.
   bucket before relying on it.
 - **Budget policy and description** of an endpoint are set at creation only; tags are re-synced.
 - Endpoints hold **at most 20 tags**; lowest-priority automatic tags are dropped first.
+
+# 11. Deploying deep-learning / heavy-dependency models
+
+Models that embed text with a transformer (e.g. ClinicalBERT + an SVM, like the
+Protocol-Intelligence classifier) carry heavy dependencies (torch, transformers). A few
+things to know:
+
+- **Bundle external weights into the artifact.** Serving endpoints have **no internet**, so a
+  model that would normally download weights from Hugging Face at runtime must ship them
+  inside the MLflow model. Save them locally and pass them via `artifacts=` to
+  `mlflow.pyfunc.save_model`/`log_model` so they're packaged and loaded from a local path.
+- **Validation runs in the model's own env on the endpoint.** The deploy job's validator
+  tries to load the model to smoke-test it, but the job's pinned env does not carry torch/
+  transformers. A missing-dependency load error there is **non-fatal** — the model is
+  rebuilt and validated in its own environment when the serving endpoint comes up. (Watch the
+  endpoint's **Build logs** for the real validation.)
+- **Use installable version pins.** The serving build installs the model's own
+  `requirements.txt` from the platform's package repo. Very old exact pins (e.g.
+  `scipy==1.10.1`, `scikit-learn==1.2.2`, `torch==1.12.1`) may **not exist** in that repo and
+  the build fails (`No matching distribution found` → `Failed to create conda environment`).
+  Prefer current or unpinned versions when the model tolerates them. For a pickled estimator,
+  loading under a newer library version only warns (`InconsistentVersionWarning`) — verify
+  predictions still match, then use the installable versions.
+- **Sizing:** these images are large (torch + weights); the **first build is slow**
+  (10–25 min). Give the endpoint enough memory (Small/4 GB works for ClinicalBERT + a linear
+  SVM) and expect a slow cold start with scale-to-zero.

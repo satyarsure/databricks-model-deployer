@@ -1,0 +1,79 @@
+name: Bundle CI
+
+# Read-only validation of the Databricks Asset Bundles on every PR / push.
+# Runs `databricks bundle validate` for each bundle (deploy-job, governance, app)
+# against the `dev` target. No resources are created or changed here — see
+# bundle-deploy.yml for deploys.
+#
+# Required (GitHub → Settings → Environments → "dev"):
+#   Secrets:
+#     DATABRICKS_HOST              e.g. https://onetakeda-us-dev-rnd.cloud.databricks.com
+#     DATABRICKS_CLIENT_ID         deploy service-principal OAuth client id
+#     DATABRICKS_CLIENT_SECRET     deploy service-principal OAuth secret
+#     DEPLOY_JOB_VALUES_LOCAL_YML  full contents of deploy-job/values.local.yml
+#     GOVERNANCE_VALUES_LOCAL_YML  full contents of governance/values.local.yml
+#     APP_VALUES_LOCAL_YML         full contents of app/values.local.yml
+# These mirror the gitignored values.local.yml files (see *.values.local.example.yml)
+# so no workspace/catalog/schema/policy values are ever committed.
+
+on:
+  pull_request:
+    paths:
+      - "deploy-job/**"
+      - "governance/**"
+      - "app/**"
+      - ".github/workflows/**"
+  push:
+    branches: ["**"]
+    paths:
+      - "deploy-job/**"
+      - "governance/**"
+      - "app/**"
+      - ".github/workflows/**"
+
+concurrency:
+  group: bundle-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: validate ${{ matrix.bundle }}
+    runs-on: ubuntu-latest
+    environment: dev
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - bundle: deploy-job
+            values_secret: DEPLOY_JOB_VALUES_LOCAL_YML
+          - bundle: governance
+            values_secret: GOVERNANCE_VALUES_LOCAL_YML
+          - bundle: app
+            values_secret: APP_VALUES_LOCAL_YML
+    env:
+      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+      DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
+      DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pin `version:` to your workspace's supported CLI once known (e.g. version: 0.240.0).
+      - name: Install Databricks CLI
+        uses: databricks/setup-cli@main
+
+      - name: Reconstruct values.local.yml from secret
+        env:
+          VALUES: ${{ secrets[matrix.values_secret] }}
+        run: |
+          if [ -z "$VALUES" ]; then
+            echo "::error::Secret ${{ matrix.values_secret }} is empty — add it to the 'dev' environment."
+            exit 1
+          fi
+          printf '%s' "$VALUES" > "${{ matrix.bundle }}/values.local.yml"
+
+      - name: databricks bundle validate
+        working-directory: ${{ matrix.bundle }}
+        run: databricks bundle validate -t dev
