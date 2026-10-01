@@ -58,13 +58,31 @@ jobs:
       DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
       DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
     steps:
+      # Until the 'dev' environment secrets are configured (see README.md), skip the real
+      # validation with a neutral notice instead of failing the run. Once DATABRICKS_HOST is
+      # set, every step below runs for real.
+      - name: Check environment is configured
+        id: cfg
+        env:
+          HOST: ${{ secrets.DATABRICKS_HOST }}
+        run: |
+          if [ -z "$HOST" ]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Skipping validate for ${{ matrix.bundle }} — the 'dev' environment secrets aren't configured yet (see .github/workflows/README.md). Expected until CI is set up."
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/checkout@v4
+        if: steps.cfg.outputs.configured == 'true'
 
       # Pin `version:` to your workspace's supported CLI once known (e.g. version: 0.240.0).
       - name: Install Databricks CLI
+        if: steps.cfg.outputs.configured == 'true'
         uses: databricks/setup-cli@main
 
       - name: Reconstruct values.local.yml from secret
+        if: steps.cfg.outputs.configured == 'true'
         env:
           VALUES: ${{ secrets[matrix.values_secret] }}
         run: |
@@ -75,5 +93,6 @@ jobs:
           printf '%s' "$VALUES" > "${{ matrix.bundle }}/values.local.yml"
 
       - name: databricks bundle validate
+        if: steps.cfg.outputs.configured == 'true'
         working-directory: ${{ matrix.bundle }}
         run: databricks bundle validate -t dev
