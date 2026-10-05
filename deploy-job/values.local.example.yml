@@ -38,6 +38,10 @@ targets:
       # pg_database: databricks_postgres
       # pg_schema: model_deployer
       app_sp: <dev-app-sp-client-id>       # fill after the app is deployed, then redeploy the job
+      # Optional — deployments running at once (default 5; the rest queue):
+      # max_concurrent_deployments: 5
+      # Optional — enable importing from OTHER workspaces' model registries (INSTALL.md §6f):
+      # source_registry_secret_scope: <secret-scope-name>
   qa:
     variables:
       root_path: /Workspace/Shared/model-deployer-qa/deploy-job

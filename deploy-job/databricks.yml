@@ -28,6 +28,20 @@ variables:
       Default MLflow experiment path used at deploy time. A deployment can still override it in
       the form; when the form leaves it blank, this value is used.
     default: ""
+  # Importing a model from ANOTHER workspace's model registry (the form's "Workspace registry"
+  # source). Name of a secret scope holding, per source workspace, <prefix>-host and <prefix>-token
+  # (see INSTALL.md, "Import from a workspace model registry"). Blank = cross-workspace import off;
+  # importing from THIS workspace's registry needs no secrets.
+  source_registry_secret_scope:
+    description: Secret scope with source-workspace registry credentials (blank = cross-workspace import disabled)
+    default: ""
+
+  # ---- Throughput ------------------------------------------------------------
+  max_concurrent_deployments:
+    description: >-
+      How many deployments run at the same time. Further deployments wait in the job queue and
+      start as running ones finish.
+    default: 5
 
   # ---- Cost / chargeback ---------------------------------------------------
   # One serverless usage (budget) policy for all Model Deployer serverless spend: it is applied to

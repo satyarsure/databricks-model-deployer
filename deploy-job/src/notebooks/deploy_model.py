@@ -4,9 +4,12 @@
 # MAGIC Wrapper → Validator → Deployer, mirroring Genesis Workbench's `deploy_model.py`.
 # MAGIC 1. **Wrapper**: load each artifact (UC Volume / S3), wrap as an MLflow pyfunc with a
 # MAGIC    signature from the input/output schema, register each A/B variant to Unity Catalog.
+# MAGIC    A full MLflow model (from a workspace model registry, or an MLflow model folder in a
+# MAGIC    UC Volume) is registered **as-is** instead — its code, files and requirements kept.
+# MAGIC    A version of another UC model (dev → test → prod promotion) is **copied unchanged**.
 # MAGIC 2. **Validator**: load each registered pyfunc, smoke-test predict, optional `mlflow.evaluate`.
 # MAGIC 3. **Deployer**: create/update the serving endpoint (A/B traffic, compute, scale-to-zero,
-# MAGIC    tags, budget policy, inference tables).
+# MAGIC    tags, budget policy, inference tables), then query it once with the deployment's example.
 
 # COMMAND ----------
 # MAGIC %md
@@ -15,13 +18,15 @@
 # MAGIC identical on every run. To change them, edit `deploy-job/requirements.txt` and redeploy.
 
 # COMMAND ----------
-import json, os, re, traceback
+import json, os, re, shutil, tempfile, traceback
+from contextlib import contextmanager
 from datetime import timedelta
+from urllib.parse import urlparse
 import pandas as pd
 import numpy as np
 import mlflow
 from mlflow.pyfunc import PythonModel
-from mlflow.models import infer_signature
+from mlflow.models import Model, infer_signature
 from mlflow.models.signature import ModelSignature
 from mlflow.types.schema import Schema, ColSpec
 from mlflow.tracking import MlflowClient
@@ -59,9 +64,13 @@ dbutils.widgets.text("pg_database", "databricks_postgres")
 dbutils.widgets.text("pg_endpoint", "")        # endpoint resource path (for the DB credential)
 dbutils.widgets.text("pg_schema", "model_deployer")
 dbutils.widgets.text("app_sp", "")             # app service-principal client id to grant SELECT
+# Secret scope holding credentials for OTHER workspaces' model registries (var.source_registry_
+# secret_scope). Blank = importing from another workspace is disabled; this workspace still works.
+dbutils.widgets.text("registry_secret_scope", "")
 
 CATALOG = dbutils.widgets.get("catalog")
 SCHEMA = dbutils.widgets.get("schema")
+REGISTRY_SECRET_SCOPE = dbutils.widgets.get("registry_secret_scope").strip()
 # Deploy-time defaults (bundle variables). A deployment's form values take precedence; these are
 # the fallbacks. Governance/chargeback tags come from the job's own tags (see _job_tags()).
 EXPERIMENT_DEFAULT = dbutils.widgets.get("experiment").strip()
@@ -283,6 +292,62 @@ def enable_ai_gateway(endpoint_name):
         else:
             print(f"[deployer] AI Gateway warning (non-fatal): {ge}")
 
+# Post-deploy endpoint check: send the deployment's own example (the sample input, else the
+# schema's dummy row) to the live endpoint and record the reply on the timeline — the end-to-end
+# proof that the SERVED model answers, which matters most for models the job can't load itself
+# (see the validator). One request, so it also appears once in the inference table. Non-fatal,
+# unless the spec sets strict_endpoint_check (CI promotion): then the reply must equal the sample
+# output, or the deployment fails before @champion moves.
+_ENVELOPE_KEYS = ("instances", "inputs", "dataframe_split", "dataframe_records")
+
+def _same(a, b):
+    """Equal as JSON values; numbers within a tiny tolerance (float round-trips)."""
+    import math
+    if isinstance(a, dict) and isinstance(b, dict):
+        return a.keys() == b.keys() and all(_same(a[k], b[k]) for k in a)
+    if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
+        return len(a) == len(b) and all(_same(x, y) for x, y in zip(a, b))
+    if isinstance(a, bool) or isinstance(b, bool):
+        return type(a) is type(b) and a == b
+    if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+        return math.isclose(a, b, rel_tol=1e-6, abs_tol=1e-9)
+    return a == b
+
+def endpoint_check(w, endpoint_name):
+    reply, failure = None, None
+    try:
+        if _si is not None:
+            if isinstance(_si, dict) and any(k in _si for k in _ENVELOPE_KEYS):
+                body = _si
+            elif isinstance(_si, dict) or (isinstance(_si, list) and _si and isinstance(_si[0], dict)):
+                body = {"dataframe_records": _si if isinstance(_si, list) else [_si]}
+            else:
+                body = {"inputs": _si}
+        elif isinstance(input_example, pd.DataFrame):
+            body = {"dataframe_records": json.loads(
+                input_example.to_json(orient="records", date_format="iso"))}
+        else:
+            return
+        reply = w.api_client.do("POST", f"/serving-endpoints/{endpoint_name}/invocations", body=body)
+        msg = f"endpoint check OK: {json.dumps(reply, default=str)[:300]}"
+    except Exception as qe:
+        failure = f"endpoint check failed: {str(qe)[:300]}"
+        msg = failure if STRICT_ENDPOINT_CHECK else f"{failure} (non-fatal)"
+    if STRICT_ENDPOINT_CHECK and failure is None:
+        got = _unwrap_output(json.loads(json.dumps(reply, default=str)))
+        want = json.loads(json.dumps(SAMPLE_OUTPUT, default=str))
+        if not _same(got, want):
+            failure = (f"endpoint check MISMATCH: expected {json.dumps(want)[:200]}, "
+                       f"got {json.dumps(got)[:200]}")
+            msg = failure
+        else:
+            msg = f"endpoint check OK (matches the expected output): {json.dumps(reply, default=str)[:300]}"
+    print(f"[deployer] {msg}")
+    log_event("deployer", "IN_PROGRESS", msg, version=globals().get("model_version_str", ""))
+    if STRICT_ENDPOINT_CHECK and failure:
+        raise RuntimeError(f"{failure} — strict_endpoint_check is on, so the deployment fails "
+                           f"(the endpoint now serves this version; roll back if needed)")
+
 def log_event(stage, status, message="", version=""):
     """Append an immutable lifecycle event (full transition history / audit trail)."""
     import time as _t
@@ -461,8 +526,15 @@ class WrappedModel(PythonModel):
 
 def localize_artifact(artifact):
     atype = (artifact.get("type") or "").lower()
-    path = artifact["path"]
+    path = artifact["path"].strip()
     if atype in ("uc_volume", "uc", "volume"):
+        # Accept "Volumes/..." and "dbfs:/Volumes/..." as "/Volumes/...". Without the leading slash
+        # the path is relative, so an MLflow model folder isn't detected and the deploy fails with
+        # FileNotFoundError.
+        if path.startswith("dbfs:"):
+            path = path[len("dbfs:"):]
+        if path.startswith("Volumes/"):
+            path = "/" + path
         return path
     if atype == "s3":
         import boto3
@@ -474,10 +546,10 @@ def localize_artifact(artifact):
     raise ValueError(f"Unsupported artifact type: {atype}")
 
 def load_model_object(local_path):
+    # (MLflow model folders never reach here — they're registered as-is; see register_as_is.)
     if os.path.isdir(local_path):
-        if os.path.exists(os.path.join(local_path, "MLmodel")):
-            return mlflow.pyfunc.load_model(local_path)
-        raise ValueError(f"Directory {local_path} is not an MLflow model")
+        raise ValueError(f"Directory {local_path} is not an MLflow model — point to the folder "
+                         f"that contains the MLmodel file, or to a single model file")
     try:
         import joblib
         return joblib.load(local_path)
@@ -485,6 +557,241 @@ def load_model_object(local_path):
         import pickle
         with open(local_path, "rb") as f:
             return pickle.load(f)
+
+# ---- Full MLflow models: registered AS-IS, not re-wrapped ----------------------------------
+# A full MLflow model — a version in a workspace (legacy) model registry, or an MLflow model folder
+# in a UC Volume — can carry its own code (code_paths), files (artifacts) and pip requirements, e.g.
+# a custom featurizer package + mapping files + transformers around a bare classifier. Re-wrapping
+# it in WrappedModel with SERVED_PIP_REQUIREMENTS would drop those, so it would register but fail
+# (or mis-predict) when served. Instead the folder is logged to a run unchanged and registered to
+# UC; only its signature is set, from the deployment's contract — UC requires one, and the legacy
+# registry never did.
+def _find_mlmodel_dir(root):
+    """The shallowest folder under root that holds an MLmodel file (root itself when it does)."""
+    if os.path.exists(os.path.join(root, "MLmodel")):
+        return root
+    hits = [d for d, _dirs, files in os.walk(root) if "MLmodel" in files]
+    return min(hits, key=lambda d: d.count(os.sep)) if hits else None
+
+def _norm_host(url):
+    u = (url or "").strip()
+    if not u:
+        return ""
+    return urlparse(u if "://" in u else f"https://{u}").netloc.lower()
+
+@contextmanager
+def _registry(uri):
+    """Temporarily point MLflow's registry at uri (models:/ URIs resolve against it)."""
+    prev = mlflow.get_registry_uri()
+    mlflow.set_registry_uri(uri)
+    try:
+        yield
+    finally:
+        mlflow.set_registry_uri(prev)
+
+def _source_registry_uri(workspace_url):
+    """(registry URI, label) for the source workspace. Blank / this workspace -> "databricks", read
+    as the deploy job's identity. Another workspace -> "databricks://<scope>:<prefix>", MLflow's
+    built-in cross-workspace form: it reads the secrets <prefix>-host and <prefix>-token from the
+    admin-configured scope (var.source_registry_secret_scope). <prefix> is the source host with every
+    character other than a-z, 0-9 and "-" replaced by "-"."""
+    host = _norm_host(workspace_url)
+    if not host or host == _norm_host(spark.conf.get("spark.databricks.workspaceUrl")):
+        return "databricks", "this workspace"
+    if not REGISTRY_SECRET_SCOPE:
+        raise ValueError(
+            f"Importing from another workspace ({host}) is not enabled here: an admin must set the "
+            f"deploy job's source_registry_secret_scope and store that workspace's credentials "
+            f"(INSTALL.md, 'Import from a workspace model registry').")
+    prefix = re.sub(r"[^a-z0-9-]", "-", host)
+    try:
+        stored = _norm_host(dbutils.secrets.get(REGISTRY_SECRET_SCOPE, f"{prefix}-host"))
+    except Exception as se:
+        raise ValueError(
+            f"No credentials for {host}: an admin must add the secrets '{prefix}-host' and "
+            f"'{prefix}-token' to the '{REGISTRY_SECRET_SCOPE}' secret scope ({se})") from se
+    if stored != host:
+        raise ValueError(f"Secret '{prefix}-host' points to {stored}, not {host} — fix the secret.")
+    return f"databricks://{REGISTRY_SECRET_SCOPE}:{prefix}", host
+
+def _resolve_source_version(src, name, wanted):
+    """A concrete version number for "3", "Production"/"Staging" (legacy stages) or "latest"."""
+    w = str(wanted or "").strip()
+    if w.isdigit():
+        return w
+    if w.lower() == "latest":
+        versions = [int(v.version) for v in src.search_model_versions(f"name = '{name}'")]
+        if not versions:
+            raise ValueError(f"'{name}' has no registered versions")
+        return str(max(versions))
+    if w.lower() in ("production", "staging"):
+        hits = src.get_latest_versions(name, stages=[w.capitalize()])
+        if not hits:
+            raise ValueError(f"'{name}' has no version in stage {w.capitalize()}")
+        return str(hits[0].version)
+    raise ValueError(f"Version must be a number, Production, Staging or latest (got '{w}')")
+
+def fetch_registry_model(art):
+    """Download a workspace-registry model version (all of its files) to a temp folder.
+    Returns (model folder, provenance tags, source run or None)."""
+    name = (art.get("source_model_name") or "").strip()
+    src_uri, src_label = _source_registry_uri(art.get("source_workspace_url"))
+    src = MlflowClient(tracking_uri=src_uri, registry_uri=src_uri)
+    version = _resolve_source_version(src, name, art.get("source_model_version"))
+    mv = src.get_model_version(name, version)
+    dst = tempfile.mkdtemp(prefix="registry_import_")
+    with _registry(src_uri):
+        mlflow.artifacts.download_artifacts(artifact_uri=f"models:/{name}/{version}", dst_path=dst)
+    model_dir = _find_mlmodel_dir(dst)
+    if not model_dir:
+        raise ValueError(f"'{name}' v{version} has no MLmodel file — it is not an MLflow model")
+    run = None
+    if mv.run_id:
+        try:
+            run = src.get_run(mv.run_id)
+        except Exception as re_:
+            print(f"[wrapper] source run {mv.run_id} not readable (provenance tags only): {re_}")
+    prov = {"source_type": "workspace_registry", "source_workspace": src_label,
+            "source_model": name, "source_version": str(version), "source_run_id": mv.run_id or ""}
+    return model_dir, prov, run
+
+def _as_is_signature(model_dir, existing):
+    """Signature from the deployment's contract. In sample mode, prefer the model's real output when
+    it loads here (its own packages may be missing from this job's environment, so fall back to the
+    provided sample output). If the contract yields nothing, keep the model's own full signature."""
+    sig = signature
+    if SAMPLE_INPUT is not None:
+        out = None
+        try:
+            out = mlflow.pyfunc.load_model(model_dir).predict(SAMPLE_INPUT)
+        except Exception as e:
+            print(f"[wrapper] sample predict skipped (model may need packages this job lacks): {e}")
+        try:
+            sig = infer_signature(SAMPLE_INPUT, out if out is not None else SAMPLE_OUTPUT)
+        except Exception as e:
+            print(f"[wrapper] signature inference from sample failed: {e}")
+    if sig is None and existing is not None and existing.inputs is not None and existing.outputs is not None:
+        sig = existing
+    return sig
+
+def _describe_env(model_dir, m):
+    """One line on the environment the model declares (Model Serving rebuilds exactly this)."""
+    py = ""
+    for fname, pat in (("python_env.yaml", r"python:\s*['\"]?([\d.]+)"), ("conda.yaml", r"python=([\d.]+)")):
+        try:
+            with open(os.path.join(model_dir, fname)) as f:
+                hit = re.search(pat, f.read())
+            if hit:
+                py = hit.group(1)
+                break
+        except OSError:
+            pass
+    reqs = []
+    try:
+        with open(os.path.join(model_dir, "requirements.txt")) as f:
+            reqs = [l.strip() for l in f if l.strip() and not l.startswith("#")]
+    except OSError:
+        pass
+    print(f"[wrapper] model requirements: {reqs}")
+    return (f"python {py or '?'}, mlflow {getattr(m, 'mlflow_version', None) or '?'}, "
+            f"{len(reqs)} pip requirement(s)")
+
+def _copy_run_record(run):
+    """Carry the source run's training record (params, final metrics, code location, dataset
+    inputs) onto the import run, so the UC version keeps its reproducibility trail. Non-fatal."""
+    try:
+        if run.data.params:
+            mlflow.log_params(run.data.params)
+        if run.data.metrics:
+            mlflow.log_metrics(run.data.metrics)
+        t = run.data.tags or {}
+        keep = {"model_deployer.source_run_name": t.get("mlflow.runName"),
+                "model_deployer.source_code": t.get("mlflow.source.name") or t.get("mlflow.databricks.notebookPath"),
+                "model_deployer.source_git_commit": t.get("mlflow.source.git.commit")}
+        mlflow.set_tags({k: v for k, v in keep.items() if v})
+        inputs = getattr(getattr(run, "inputs", None), "dataset_inputs", None) or []
+        ds = [{"name": d.dataset.name, "digest": d.dataset.digest, "source": d.dataset.source} for d in inputs]
+        if ds:
+            mlflow.set_tag("model_deployer.source_datasets", json.dumps(ds)[:4900])
+    except Exception as ce:
+        print(f"[wrapper] could not copy the source run record (non-fatal): {ce}")
+
+def register_as_is(model_dir, label, prov, source_run=None):
+    """Log an MLflow model folder unchanged into a run and register it to UC, with only the
+    signature written from the contract. Returns (new version, environment summary)."""
+    mlmodel = os.path.join(model_dir, "MLmodel")
+    m = Model.load(mlmodel)
+    sig = _as_is_signature(model_dir, m.signature)
+    if sig is None or sig.inputs is None or sig.outputs is None:
+        raise ValueError("Unity Catalog needs a model signature (inputs and outputs) — define the "
+                         "model contract (schema, or sample input + output) on the form")
+    m.signature = sig
+    m.save(mlmodel)
+    env = _describe_env(model_dir, m)
+    with mlflow.start_run(run_name=f"{spec.get('name')}_{label}") as run:
+        mlflow.set_tags({f"model_deployer.{k}": v for k, v in prov.items()})
+        if source_run is not None:
+            _copy_run_record(source_run)
+        mlflow.log_artifacts(model_dir, artifact_path="model")
+    mv = mlflow.register_model(f"runs:/{run.info.run_id}/model", uc_full)
+    # Provenance on the UC version itself, so Catalog Explorer shows where it came from.
+    for k, v in prov.items():
+        if not v:
+            continue
+        try:
+            client.set_model_version_tag(uc_full, str(mv.version), k, str(v))
+        except Exception as te:
+            print(f"[wrapper] model-version tag {k} skipped (non-fatal): {te}")
+    return int(mv.version), env
+
+# ---- Promotion: copy a version of ANOTHER Unity Catalog model ------------------------------
+# Dev → test → prod promotion of an already-validated model. The version is copied unchanged
+# (files, signature, requirements, tags) with MlflowClient.copy_model_version, so the artifact
+# served here is byte-for-byte the one that passed in the lower environment — nothing is rebuilt.
+# The source model must be readable from this workspace: its catalog bound to this workspace,
+# with USE CATALOG / USE SCHEMA / EXECUTE granted to the deploy job's identity.
+def _resolve_uc_version(name, wanted):
+    """A concrete version number for "3", an alias ("champion" or "@champion") or "latest"."""
+    w = str(wanted or "").strip().lstrip("@")
+    if w.isdigit():
+        return w
+    if w.lower() == "latest":
+        v = latest_version(name)
+        if not v:
+            raise ValueError(f"'{name}' has no registered versions")
+        return str(v)
+    if not w:
+        raise ValueError("Source version must be a number, an alias (e.g. champion) or latest")
+    return str(client.get_model_version_by_alias(name, w).version)
+
+def copy_uc_model(art):
+    """Copy a source UC model version into this deployment's UC model. Returns (version, origin)."""
+    name = (art.get("source_model_name") or "").strip()
+    if name.count(".") != 2:
+        raise ValueError(f"Source model must be a full catalog.schema.model name (got '{name}')")
+    if name.lower() == uc_full.lower():
+        raise ValueError(f"Source and target are the same model ({uc_full}) — to serve one of its "
+                         f"versions, use an existing-version variant instead")
+    try:
+        src_version = _resolve_uc_version(name, art.get("source_model_version"))
+        mv = client.copy_model_version(f"models:/{name}/{src_version}", uc_full)
+    except Exception as e:
+        raise ValueError(
+            f"Could not copy {name} (version '{art.get('source_model_version')}') into {uc_full}: {e} "
+            f"— the source catalog must be readable from this workspace, with USE CATALOG, "
+            f"USE SCHEMA and EXECUTE granted to the deploy job's identity") from e
+    # Copied tags keep the source's own provenance (where it was first imported from); these record
+    # this promotion hop (the source version's own promoted_from_* tags show the hop before). Non-fatal.
+    prov = {"promoted_from_model": name, "promoted_from_version": src_version}
+    alias = str(art.get("source_model_version") or "").strip().lstrip("@")
+    if alias and not alias.isdigit() and alias.lower() != "latest":
+        prov["promoted_from_alias"] = alias
+    for k, v in prov.items():
+        try:
+            client.set_model_version_tag(uc_full, str(mv.version), k, v)
+        except Exception as te:
+            print(f"[wrapper] model-version tag {k} skipped (non-fatal): {te}")
+    return int(mv.version), f"{name} v{src_version}"
 
 # COMMAND ----------
 # ---- STAGE 1: Wrapper — wrap + register each variant ------------------------
@@ -538,6 +845,9 @@ _si = _parse_json_maybe(spec.get("sample_input"))
 _so = _parse_json_maybe(spec.get("sample_output"))
 SAMPLE_INPUT = _unwrap_input(_si) if _si is not None else None
 SAMPLE_OUTPUT = _unwrap_output(_so) if _so is not None else None
+# Opt-in (set by CI promotion, not the form): the post-deploy endpoint check must return exactly the
+# sample output, or the deployment FAILS — the gate that proves a promoted model answers correctly.
+STRICT_ENDPOINT_CHECK = bool(spec.get("strict_endpoint_check"))
 
 signature = build_signature(spec.get("input_schema", []), spec.get("output_schema", []))
 input_example = build_input_example(spec.get("input_schema", []))
@@ -549,6 +859,9 @@ artifacts = spec.get("artifacts", [])
 variant_versions = []
 
 try:
+    if STRICT_ENDPOINT_CHECK and (SAMPLE_INPUT is None or SAMPLE_OUTPUT is None):
+        raise ValueError("strict_endpoint_check needs a sample input and sample output to compare "
+                         "the endpoint's reply against")
     for i, art in enumerate(artifacts):
         label = art.get("label") or chr(ord("A") + i)
         traffic = art.get("traffic_percent", 100 // max(len(artifacts), 1))
@@ -557,11 +870,43 @@ try:
         # new artifact. Serve it as-is — no re-wrap, no new version.
         if art.get("source") == "existing":
             version = int(art.get("version"))
-            variant_versions.append({"label": label, "version": version, "traffic_percent": traffic})
+            variant_versions.append({"label": label, "version": version, "traffic_percent": traffic,
+                                     "as_is": True})
             print(f"[wrapper] variant {label} <- existing {uc_full} v{version}")
             continue
-        print(f"[wrapper] variant {label} <- {art.get('path')}")
-        raw_model = load_model_object(localize_artifact(art))
+        # Promotion: a version of another UC model (e.g. the dev catalog's), copied unchanged.
+        if (art.get("type") or "").lower() == "uc_model":
+            version, origin = copy_uc_model(art)
+            variant_versions.append({"label": label, "version": version, "traffic_percent": traffic,
+                                     "as_is": True})
+            print(f"[wrapper] copied {origin} -> {uc_full} v{version} (variant {label})")
+            log_event("wrapper", "IN_PROGRESS", f"variant {label}: copied {origin} unchanged as v{version}")
+            continue
+        print(f"[wrapper] variant {label} <- {art.get('path') or art.get('source_model_name')}")
+        # A full MLflow model (workspace registry, or an MLflow model folder in a Volume) is
+        # registered as-is; a single model file is loaded and wrapped below.
+        as_is = None
+        if (art.get("type") or "").lower() == "workspace_registry":
+            as_is = fetch_registry_model(art)
+        else:
+            local = localize_artifact(art)
+            if os.path.isdir(local) and os.path.exists(os.path.join(local, "MLmodel")):
+                # Copy first: the signature is written into MLmodel — never into the user's folder.
+                copy = os.path.join(tempfile.mkdtemp(prefix="mlflow_dir_"), "model")
+                shutil.copytree(local, copy)
+                as_is = (copy, {"source_type": "mlflow_model_dir", "source_path": art["path"]}, None)
+        if as_is:
+            model_dir, prov, src_run = as_is
+            version, env = register_as_is(model_dir, label, prov, src_run)
+            variant_versions.append({"label": label, "version": version, "traffic_percent": traffic,
+                                     "as_is": True})
+            origin = (f"{prov['source_model']} v{prov['source_version']} from {prov['source_workspace']}"
+                      if prov["source_type"] == "workspace_registry" else prov["source_path"])
+            print(f"[wrapper] registered {uc_full} v{version} as-is from {origin} (variant {label})")
+            log_event("wrapper", "IN_PROGRESS",
+                      f"variant {label}: registered {origin} as-is as v{version} ({env})")
+            continue
+        raw_model = load_model_object(local)
         wrapped = WrappedModel(raw_model)
         sig = signature
         if SAMPLE_INPUT is not None:
@@ -607,7 +952,26 @@ log_event("validator", "VALIDATING", "validating registered model(s)", version=g
 try:
     for v in variant_versions:
         model_uri = f"models:/{uc_full}/{v['version']}"
-        model = mlflow.pyfunc.load_model(model_uri)
+        try:
+            model = mlflow.pyfunc.load_model(model_uri)
+        except Exception as le:
+            # A missing package (ModuleNotFoundError / ImportError) means the model needs libraries
+            # this deploy job's pinned env doesn't carry — e.g. torch/transformers for a model that
+            # embeds text with a transformer. That is NOT a deploy failure: Model Serving rebuilds the
+            # model's OWN environment from its requirements and validates it there (endpoint check
+            # below). So a missing-dependency load error is non-fatal for ANY model, not only ones
+            # flagged as_is (an as_is model that re-wraps heavy deps can still hit this). Other load
+            # errors on a re-wrapped (non-as_is) model are real and still fail.
+            missing_dep = isinstance(le, (ModuleNotFoundError, ImportError))
+            if not v.get("as_is") and not missing_dep:
+                raise
+            print(f"[validator] {model_uri} not loadable in the deploy job env "
+                  f"(non-fatal — validated on the serving endpoint instead): {le}")
+            log_event("validator", "IN_PROGRESS",
+                      f"v{v['version']} needs packages the deploy job doesn't have; validating on "
+                      f"the serving endpoint instead: {str(le)[:240]}",
+                      version=globals().get("model_version_str", ""))
+            continue
         if input_example is not None:
             # The smoke test is NON-FATAL. It runs the model on a generic dummy example built from
             # the input schema — useful for tabular models, but some models (text/NLP, tensor or
@@ -730,8 +1094,17 @@ try:
     w = WorkspaceClient()
     config = EndpointCoreConfigInput(name=endpoint_name, served_entities=served_entities,
                                      traffic_config=TrafficConfig(routes=routes))
-    try:
-        w.serving_endpoints.get(endpoint_name)
+
+    def _update_existing():
+        # Another deployment of this endpoint (e.g. the champion an A/B test builds on) may still be
+        # rolling out, and a config update issued meanwhile is rejected. Wait for it to settle first.
+        # Non-fatal: a previously FAILED update also ends the wait; the update below then reports.
+        print(f"[deployer] waiting for any in-progress update of {endpoint_name} to finish")
+        try:
+            w.serving_endpoints.wait_get_serving_endpoint_not_updating(
+                endpoint_name, timeout=timedelta(minutes=60))
+        except Exception as we:
+            print(f"[deployer] wait for an in-progress endpoint update ended: {we}")
         print(f"[deployer] updating {endpoint_name} (budget policy/description stay as first created)")
         w.serving_endpoints.update_config_and_wait(
             name=endpoint_name, served_entities=served_entities,
@@ -750,7 +1123,15 @@ try:
             print(f"[deployer] synced endpoint tags ({len(tags)} set, {len(delete_keys)} removed)")
         except Exception as te:
             print(f"[deployer] tag sync warning (non-fatal): {te}")
+
+    try:
+        w.serving_endpoints.get(endpoint_name)
+        endpoint_exists = True
     except errors.platform.ResourceDoesNotExist:
+        endpoint_exists = False
+    if endpoint_exists:
+        _update_existing()
+    else:
         print(f"[deployer] creating {endpoint_name} (budget_policy_id={budget_policy_id})")
         # budget_policy_id + description are create-time only. Tags are NOT passed to create — they
         # are applied via the tags API right after (below), so an unusual governance tag key/value
@@ -769,17 +1150,28 @@ try:
             print(f"[deployer] WARNING: installed databricks-sdk create_and_wait does not accept "
                   f"{_dropped}; skipping. Pin a version that supports them (deploy-job/requirements.txt).")
             kw = {k: v for k, v in kw.items() if k in _allowed}
-        w.serving_endpoints.create_and_wait(**kw)
         try:
-            w.serving_endpoints.patch(name=endpoint_name, add_tags=tags)
-            print(f"[deployer] applied {len(tags)} endpoint tags")
-        except Exception as te:
-            print(f"[deployer] endpoint tag apply warning (non-fatal): {te}")
+            w.serving_endpoints.create_and_wait(**kw)
+        except errors.DatabricksError as ce:
+            # A concurrent deployment of the same endpoint created it first — update it instead.
+            if "already exists" not in str(ce).lower():
+                raise
+            print(f"[deployer] {endpoint_name} was created concurrently; updating it instead")
+            _update_existing()
+        else:
+            try:
+                w.serving_endpoints.patch(name=endpoint_name, add_tags=tags)
+                print(f"[deployer] applied {len(tags)} endpoint tags")
+            except Exception as te:
+                print(f"[deployer] endpoint tag apply warning (non-fatal): {te}")
 
     enable_ai_gateway(endpoint_name)
 
     # Access control: the UI submitter gets CAN_MANAGE, plus any principals from spec.permissions.
     apply_endpoint_permissions(endpoint_name)
+
+    # End-to-end proof: query the live endpoint once with the deployment's example.
+    endpoint_check(w, endpoint_name)
 
     # Lifecycle: mark the active (highest-traffic) version as @champion in UC.
     try:
