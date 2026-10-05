@@ -31,8 +31,8 @@ Deploy job (DABs, serverless) — one notebook, three stages:
    Wrapper    → load artifact(s), wrap as MLflow pyfunc, build the SIGNATURE (from a columnar schema,
                 OR inferred from a sample input/output — see "Model contract" below), register each
                 new-artifact variant to UC (a variant may instead reference an existing version).
-                A full MLflow model (workspace registry / MLflow folder) is registered AS-IS — see
-                "Artifact sources" below
+                A full MLflow model (workspace registry / MLflow folder) is registered AS-IS, and a
+                version of another UC model (promotion) is copied unchanged — see "Artifact sources"
    Validator  → load the registered pyfunc, smoke-test predict (non-fatal — surfaced on the timeline
                 but never blocks serving), optional mlflow.evaluate vs an eval dataset
    Deployer   → create/update the serving endpoint (traffic split, compute, scale-to-zero, tags,
@@ -133,6 +133,7 @@ signature is always produced — you can't register to UC with none.
 | **UC Volume** / **S3** — a single model file (`.pkl`, joblib) | Loaded, wrapped in the generic pyfunc, registered with pinned requirements. |
 | **UC Volume** — an MLflow model folder (contains `MLmodel`) | Registered **as-is**. |
 | **Workspace registry** — workspace URL (blank = this one) + model name + version/stage | Downloaded from that registry, registered **as-is**. Another workspace needs one-time admin setup ([INSTALL.md](INSTALL.md) §6f). |
+| **UC model (promote)** — `catalog.schema.model` + version / alias / `latest` | Copied unchanged into the target UC model (`copy_model_version`) — dev → test → prod promotion. The source catalog must be readable from this workspace. CI: `promote-model.yml` + `promotions/` ([docs/Test_Prod_Promotion_Setup.md](docs/Test_Prod_Promotion_Setup.md)). |
 
 **As-is** means the MLflow model folder is logged to a run unchanged — its `code/` (e.g. a custom
 featurizer package), `artifacts/` (e.g. mapping files) and `requirements.txt` (e.g. `transformers`)

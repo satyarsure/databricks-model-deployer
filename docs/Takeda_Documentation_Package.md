@@ -83,9 +83,17 @@ gitignored `values.local.yml` (see `*/values.local.example.yml`). CI/CD workflow
 `bundle validate` / `bundle deploy` are in `.github/workflows/`.
 
 ### Environments & promotion
-Targets **dev → qa → prod**. Promotion is a standard code promotion (bundle deploy to the
-higher target) + Takeda change-control/ticketing. Keep **Unity Catalog as the system of
-record** for models (UC enforces signatures).
+Targets **dev → qa (Test) → prod**. Two things are promoted, separately, both through GitHub
+Actions with an approval on each environment (Takeda change control):
+- **The tool** — a standard code promotion: `bundle-deploy.yml` (bundle deploy to the higher target).
+- **Each model** — `promote-model.yml`: the registered version that passed in the lower
+  environment is **copied unchanged** into the next environment's catalog and served there. The run
+  **fails unless** the new endpoint returns the expected answer, and its summary is the evidence for
+  the change ticket. Per-model specs live in `promotions/`. The same copy is available in the app
+  as the **UC model (promote)** artifact source.
+
+Keep **Unity Catalog as the system of record** for models (UC enforces signatures). Setup:
+`docs/Test_Prod_Promotion_Setup.md`. Prod change-request content: `docs/Production_Change_Request_PO.md`.
 
 ### Identity
 The app runs with an **app service principal** plus **on-behalf-of (OBO)** user auth, so each

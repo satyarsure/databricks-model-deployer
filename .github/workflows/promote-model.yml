@@ -1,0 +1,198 @@
+name: Promote Model
+
+# Promotes a registered model one environment up (dev → qa, qa → prod). It runs the TARGET
+# environment's Model Deployer deploy job with a "UC model" variant, so the job:
+#   1. copies the source version unchanged into the target catalog (copy_model_version),
+#   2. creates/updates the serving endpoint, and
+#   3. queries it with the spec's sample_input and FAILS unless the reply equals sample_output
+#      (strict_endpoint_check).
+# The deployment also shows up in that environment's Model Deployer app (Deployed Models) with
+# its full lifecycle timeline.
+#
+# Approvals: put required reviewers on the qa / prod GitHub environments. The approval plus this
+# run's summary (source version, target version, endpoint reply) is the change-control evidence.
+#
+# Per environment (GitHub → Settings → Environments → qa / prod):
+#   Secrets (same as bundle-deploy.yml): DATABRICKS_HOST, DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET
+#   Variables:
+#     UC_CATALOG, UC_SCHEMA                where the model is promoted TO (this environment)
+#     SOURCE_UC_CATALOG, SOURCE_UC_SCHEMA  where it is promoted FROM (the environment below)
+#     DEPLOY_JOB_ID      (optional) the deploy job's id — looked up by name when unset
+#     ENDPOINT_SUFFIX    (optional) appended to endpoint names, e.g. "_qa" if qa shares a workspace
+
+on:
+  workflow_dispatch:
+    inputs:
+      spec:
+        description: Promotion spec file
+        default: promotions/protocol_intelligence.json
+      environment:
+        description: Target environment
+        type: choice
+        options: [qa, prod]
+        default: qa
+      source_version:
+        description: Source version or alias to promote (blank = the spec's, usually champion)
+        required: false
+        default: ""
+      change_request:
+        description: Change request / ticket id (required for prod)
+        required: false
+        default: ""
+
+concurrency:
+  # One promotion per environment + model at a time; never cancel one in flight.
+  group: promote-${{ github.event.inputs.environment }}-${{ github.event.inputs.spec }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  promote:
+    name: promote to ${{ github.event.inputs.environment }}
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment }}
+    # Serving builds for heavy models (e.g. torch) take ~30 min; the job waits up to 60 for the endpoint.
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash # -eo pipefail: a failing CLI call in a pipeline fails the step
+    env:
+      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+      DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
+      DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+      TARGET_ENV: ${{ github.event.inputs.environment }}
+      SPEC_FILE: ${{ github.event.inputs.spec }}
+      SOURCE_VERSION: ${{ github.event.inputs.source_version }}
+      CHANGE_REQUEST: ${{ github.event.inputs.change_request }}
+      UC_CATALOG: ${{ vars.UC_CATALOG }}
+      UC_SCHEMA: ${{ vars.UC_SCHEMA }}
+      SOURCE_UC_CATALOG: ${{ vars.SOURCE_UC_CATALOG }}
+      SOURCE_UC_SCHEMA: ${{ vars.SOURCE_UC_SCHEMA }}
+      DEPLOY_JOB_ID: ${{ vars.DEPLOY_JOB_ID }}
+      ENDPOINT_SUFFIX: ${{ vars.ENDPOINT_SUFFIX }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pin `version:` to your workspace's supported CLI once known (e.g. version: 0.240.0).
+      - name: Install Databricks CLI
+        uses: databricks/setup-cli@main
+
+      - name: Check inputs and environment configuration
+        run: |
+          fail() { echo "::error::$1"; exit 1; }
+          case "$SPEC_FILE" in promotions/*.json) ;; *) fail "spec must be a promotions/*.json file (got '$SPEC_FILE')";; esac
+          [ -f "$SPEC_FILE" ] || fail "$SPEC_FILE not found"
+          [ -n "$DATABRICKS_HOST" ] || fail "Secret DATABRICKS_HOST is not set on the '$TARGET_ENV' environment"
+          for v in UC_CATALOG UC_SCHEMA SOURCE_UC_CATALOG SOURCE_UC_SCHEMA; do
+            [ -n "${!v}" ] || fail "Variable $v is not set on the '$TARGET_ENV' environment (see the header of this workflow)"
+          done
+          if [ "$TARGET_ENV" = "prod" ] && [ -z "$CHANGE_REQUEST" ]; then
+            fail "A change_request id is required to promote to prod"
+          fi
+          jq -e --arg e "$TARGET_ENV" '.source[$e].model' "$SPEC_FILE" > /dev/null \
+            || fail "$SPEC_FILE has no source.$TARGET_ENV.model"
+
+      - name: Build the deploy spec
+        run: |
+          SRC_MODEL="$SOURCE_UC_CATALOG.$SOURCE_UC_SCHEMA.$(jq -r --arg e "$TARGET_ENV" '.source[$e].model' "$SPEC_FILE")"
+          SRC_VERSION="${SOURCE_VERSION:-$(jq -r --arg e "$TARGET_ENV" '.source[$e].version // "champion"' "$SPEC_FILE")}"
+          # Same shape the app's Deploy form submits, with one UC-model variant. deployed_by is the
+          # deploy service principal (a valid endpoint principal); the GitHub actor and change
+          # request are recorded as endpoint tags and in the run summary.
+          jq -c \
+            --arg cat "$UC_CATALOG" --arg sch "$UC_SCHEMA" \
+            --arg src "$SRC_MODEL" --arg ver "$SRC_VERSION" \
+            --arg by "$DATABRICKS_CLIENT_ID" --arg suffix "$ENDPOINT_SUFFIX" \
+            --arg actor "$GITHUB_ACTOR" --arg cr "$CHANGE_REQUEST" --arg run "$GITHUB_RUN_ID" '
+            {
+              name: .name,
+              description: (.description // ""),
+              artifacts: [{label: "A", source: "artifact", type: "uc_model",
+                           source_model_name: $src, source_model_version: $ver, traffic_percent: 100}],
+              input_schema: [], output_schema: [],
+              sample_input: (.sample_input | tojson),
+              sample_output: (.sample_output | tojson),
+              experiment_name: "", eval_dataset: "", serverless_usage_policy: "",
+              tags: ((.tags // {}) + {promoted_by: $actor, promotion_run: $run}
+                     + (if $cr == "" then {} else {change_request: $cr} end)),
+              permissions: (.permissions // {}),
+              uc: {catalog: $cat, schema: $sch, model: .uc_model},
+              compute: (.compute // {compute_type: "cpu", size: "SMALL", scale_to_zero: true}),
+              endpoint_name: ((.endpoint_name // (.uc_model + "_endpoint")) + $suffix),
+              deployed_by: $by,
+              strict_endpoint_check: true
+            }' "$SPEC_FILE" > deploy_spec.json
+          echo "SRC_MODEL=$SRC_MODEL" >> "$GITHUB_ENV"
+          echo "SRC_VERSION=$SRC_VERSION" >> "$GITHUB_ENV"
+          echo "ENDPOINT=$(jq -r '.endpoint_name' deploy_spec.json)" >> "$GITHUB_ENV"
+          echo "TARGET_MODEL=$UC_CATALOG.$UC_SCHEMA.$(jq -r '.uc.model' deploy_spec.json)" >> "$GITHUB_ENV"
+          jq . deploy_spec.json
+
+      - name: Find the deploy job
+        run: |
+          JOB_ID="$DEPLOY_JOB_ID"
+          if [ -z "$JOB_ID" ]; then
+            # qa/prod deploy in `mode: production`, so the job keeps its exact bundle name.
+            JOB_ID=$(databricks jobs list --name mlops_deploy_model_job -o json \
+              | jq -r 'if type == "array" then . else (.jobs // []) end | .[0].job_id // empty')
+          fi
+          [ -n "$JOB_ID" ] || { echo "::error::No mlops_deploy_model_job in $DATABRICKS_HOST — deploy the bundle to '$TARGET_ENV' first, or set DEPLOY_JOB_ID"; exit 1; }
+          echo "JOB_ID=$JOB_ID" >> "$GITHUB_ENV"
+
+      - name: Run the deploy job and wait
+        run: |
+          # ms-scale id like the app's (Date.now()); the random part keeps two promotions in the same
+          # second (different models) from sharing a deployment row.
+          DEPLOYMENT_ID=$(( $(date +%s) * 1000 + RANDOM % 1000 ))
+          jq -n --argjson job "$JOB_ID" --rawfile spec deploy_spec.json --arg id "$DEPLOYMENT_ID" \
+            '{job_id: $job, notebook_params: {deploy_spec: ($spec | rtrimstr("\n")), deployment_id: $id}}' > run_now.json
+          RUN_ID=$(databricks jobs run-now --json @run_now.json --no-wait -o json | jq -r '.run_id')
+          [ -n "$RUN_ID" ] && [ "$RUN_ID" != "null" ] || { echo "::error::run-now returned no run id"; exit 1; }
+          echo "RUN_ID=$RUN_ID" >> "$GITHUB_ENV"
+          echo "Deploy job run $RUN_ID started (deployment $DEPLOYMENT_ID)"
+          deadline=$(( $(date +%s) + 110 * 60 ))
+          while :; do
+            [ "$(date +%s)" -lt "$deadline" ] || { echo "::error::Timed out waiting for run $RUN_ID (${STATE:-unknown})"; exit 1; }
+            # A transient API error must not abandon a run that is still going: retry.
+            RUN=$(databricks jobs get-run "$RUN_ID" -o json) || { echo "get-run failed; retrying"; sleep 30; continue; }
+            STATE=$(jq -r '.state.life_cycle_state' <<< "$RUN")
+            case "$STATE" in TERMINATED|SKIPPED|INTERNAL_ERROR) break ;; esac
+            echo "$(date -u +%H:%M:%S) $STATE"
+            sleep 30
+          done
+          RESULT=$(jq -r '.state.result_state // "UNKNOWN"' <<< "$RUN")
+          echo "RUN_URL=$(jq -r '.run_page_url // ""' <<< "$RUN")" >> "$GITHUB_ENV"
+          echo "RESULT=$RESULT" >> "$GITHUB_ENV"
+          echo "Run $RUN_ID finished: $STATE / $RESULT — $(jq -r '.state.state_message // ""' <<< "$RUN")"
+          [ "$RESULT" = "SUCCESS" ] || { echo "::error::Deploy job run $RUN_ID ended $RESULT — open the run (or the app's Deployed Models timeline) for the failing stage"; exit 1; }
+
+      - name: Record evidence
+        if: always()
+        run: |
+          REPLY=""
+          EXPECTED=$(jq -c '.sample_output' "$SPEC_FILE" 2>/dev/null || echo "?")
+          if [ "${RESULT:-}" = "SUCCESS" ]; then
+            # Independent re-query from CI (outside the deploy job) for the change record.
+            REPLY=$(databricks api post "/serving-endpoints/$ENDPOINT/invocations" \
+              --json "$(jq -c '.sample_input' "$SPEC_FILE")" 2>&1 || true)
+          fi
+          {
+            echo "### Promotion to \`$TARGET_ENV\`: ${RESULT:-NOT RUN}"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Source | \`${SRC_MODEL:-?}\` @ \`${SRC_VERSION:-?}\` |"
+            echo "| Target model | \`${TARGET_MODEL:-?}\` |"
+            echo "| Endpoint | \`${ENDPOINT:-?}\` on $DATABRICKS_HOST |"
+            echo "| Deploy job run | ${RUN_URL:-${RUN_ID:-not started}} |"
+            echo "| Change request | ${CHANGE_REQUEST:-—} |"
+            echo "| Requested by | $GITHUB_ACTOR (commit \`$GITHUB_SHA\`) |"
+            echo ""
+            echo "Expected reply: \`$EXPECTED\`"
+            if [ -n "$REPLY" ]; then
+              echo ""
+              echo "Endpoint reply (re-queried from CI): \`$(tr -d '\n' <<< "$REPLY")\`"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

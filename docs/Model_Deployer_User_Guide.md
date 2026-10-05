@@ -65,7 +65,7 @@ becoming ready).
 |---|---|---|
 | **Model Name** | Yes | A friendly name for the deployment (e.g. `house-price-regressor`). Shown on the board. |
 | **Description** | No | Free text describing the model. |
-| **Artifact** | Yes | Where the model lives — a **UC Volume** path, an **S3** path, or a **Workspace registry** model (see section 6). For A/B tests you can add more than one, or reference an existing version. |
+| **Artifact** | Yes | Where the model lives — a **UC Volume** path, an **S3** path, a **Workspace registry** model, or a **UC model** to promote from another catalog (see section 6). For A/B tests you can add more than one, or reference an existing version. |
 | **Model contract** | Yes | How you describe inputs/outputs (see section 7): **Columnar schema** (tabular models) or **Sample input / output** (text / JSON / tensor models). |
 | **Input / Output schema** *(schema mode)* | — | JSON arrays of the model's columns (see section 7). |
 | **Sample input / output** *(sample mode)* | — | A real request/response example, e.g. `{"instances": [...]}` / `{"predictions": [...]}` (see section 7). |
@@ -93,6 +93,7 @@ Each deployment has one or more **variants**. A variant is one of:
   | **UC Volume** — an MLflow model folder | `/Volumes/<catalog>/<schema>/<volume>/path/to/model_folder` (the folder that contains the `MLmodel` file) | Registered **as-is** (see below). |
   | **S3** | `s3://bucket/path/to/model.pkl` | Loaded, wrapped, and registered as a new version. |
   | **Workspace registry** | **Source workspace URL** (leave blank for this workspace), **Registered model name**, and **Version or stage** (a number, `Production`, `Staging`, or `latest`) | The model version is copied into Unity Catalog **as-is** (see below). |
+  | **UC model (promote)** | **Source model** — a full `catalog.schema.model` name — and **Version or alias** (a number, an alias such as `champion`, or `latest`) | That exact version is **copied unchanged** into this deployment's UC model (see *Promoting* below). |
 
 - **Existing version** — an already-registered version of the same Unity Catalog model. It is
   served **as-is** (no re-wrapping). Used for champion-vs-challenger A/B tests (section 13).
@@ -116,6 +117,18 @@ requires (the old workspace registry didn't). The new version also records where
 > **Another workspace?** Importing from a *different* workspace works only after an administrator
 > has connected that workspace (see INSTALL.md §6f). Until then the deployment fails at the wrapper
 > stage with a message saying so. Importing from **this** workspace needs no setup.
+
+**Promoting a model to the next environment (dev → test → prod).** Once a model works in one
+environment, promote it rather than rebuilding it. In the **next environment's** Model Deployer,
+choose **UC model (promote)** and enter the model's name in the lower environment's catalog (for
+example `usdev_rnd_non_gxp.rnd_us_mart_po.protocol_intelligence_ui`) and the version or alias
+(`champion` is the version currently serving). The deployer copies that version as it is — same
+files, signature, and package list — so the version served in test or prod is exactly the one
+already validated. The copy is tagged `promoted_from_model` / `promoted_from_version` in Catalog
+Explorer. The source catalog must be readable from this workspace (an administrator grants this
+once per environment). Promotions to test and prod normally run through the **Promote Model** CI
+workflow, which adds an approval step and fails unless the endpoint gives the expected answer
+(`docs/Test_Prod_Promotion_Setup.md`).
 
 **A file on your computer?** Uploading straight from your computer isn't supported. It's two steps:
 (1) upload the file to a UC Volume (Catalog Explorer → your volume → **Upload to this volume**), then
@@ -309,6 +322,8 @@ If a deployment turns **Failed**, expand the row's lifecycle timeline — the la
 |---|---|
 | **Wrapper** | The artifact couldn't be loaded (wrong path, not a model file, unpickling error), or (schema mode) the model couldn't be registered — Unity Catalog needs a valid signature. |
 | **Wrapper** *(Workspace registry)* | The model name/version doesn't exist or you can't read it; or the source workspace hasn't been connected by an administrator (the message names the missing setup). |
+| **Wrapper** *(UC model)* | The source model, version, or alias doesn't exist, or this workspace can't read the source catalog (*"Could not copy … must be readable from this workspace"*): ask an administrator for the promotion grants. |
+| **Deployer** *(CI promotion)* | *"endpoint check MISMATCH: expected …, got …"* — the endpoint answered, but not with the expected output, so the promotion is stopped. `@champion` is not moved. |
 | **Deployer** | The serving endpoint could not be created/updated (permissions, quota, or configuration). For an imported model, also check the endpoint's **build logs** — the model's own package list must install on Model Serving. |
 
 Note: the **validation smoke test is non-fatal** — if it can't exercise the model with the example

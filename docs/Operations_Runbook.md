@@ -82,49 +82,48 @@ required for every environment above dev, including new "greenfield" ones):
 
 1. Change ticket raised, referencing the commit/tag being promoted.
 2. Evidence from the lower environment: `bundle validate` output, and a passing smoke test
-   (testing/README.md **TC1**, plus **TC12** if model imports changed) with the run links.
+   (testing/README.md **TC1**, plus **TC12** if model imports changed and **TC14** if promotion changed) with the run links.
 3. Approval recorded on the ticket.
 4. Deploy job, then app (section 4) to the target environment.
 5. Post-deploy check: app status `SUCCEEDED` (`databricks apps get <APP_NAME>`), then one TC1 deploy
    reaching **Complete** with **endpoint check OK**. Attach to the ticket.
 6. Rollback plan: redeploy the previous commit the same way (bundles are declarative).
 
-**Automating it.** If your CI runs the Databricks CLI (e.g. GitHub Actions or Azure DevOps), the
-pipeline is the same commands. An example GitHub Actions workflow — adapt names and secrets to your
-setup; per-environment approvals come from GitHub *environments* with required reviewers:
+**Automating it.** The repo's GitHub Actions workflows run exactly these commands with
+service-principal OAuth; per-environment approvals come from GitHub *environments* with required
+reviewers (setup: `.github/workflows/README.md`, `docs/Test_Prod_Promotion_Setup.md` Step 5):
 
-```yaml
-name: promote-model-deployer
-on:
-  workflow_dispatch:
-    inputs:
-      target:
-        description: dev | qa | prod
-        required: true
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    environment: ${{ inputs.target }}   # required reviewers on qa / prod
-    env:
-      DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
-      DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}          # deployment service principal
-      DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: databricks/setup-cli@main
-      - name: Write this environment's values (kept in secrets, never in git)
-        run: |
-          printf '%s' "$JOB_VALUES" > deploy-job/values.local.yml
-          printf '%s' "$APP_VALUES" > app/values.local.yml
-        env:
-          JOB_VALUES: ${{ secrets.DEPLOY_JOB_VALUES_YML }}
-          APP_VALUES: ${{ secrets.APP_VALUES_YML }}
-      - name: Deploy job, then app
-        run: |
-          (cd deploy-job && databricks bundle validate -t "${{ inputs.target }}" && databricks bundle deploy -t "${{ inputs.target }}")
-          (cd app && databricks bundle deploy -t "${{ inputs.target }}")
-          databricks apps deploy "${{ vars.APP_NAME }}" --source-code-path "${{ vars.APP_ROOT_PATH }}/app/files"
-```
+| Workflow | Promotes |
+|---|---|
+| `bundle-deploy.yml` (manual, `environment` = dev / qa / prod) | The **platform**: governance (opt-in) → deploy job → app |
+| `promote-model.yml` (manual, `environment` = qa / prod) | A **model**: see below |
+
+## Promoting a model (dev → QA → production)
+
+Promote the **registered model version**, not the source files: the version that passed in the lower
+environment is copied unchanged (`MlflowClient.copy_model_version` — same files, signature,
+requirements) into the next environment's catalog and served there. Nothing is rebuilt, so what was
+validated is what runs.
+
+1. Commit a promotion spec under `promotions/` (one per model; `promotions/README.md`). It holds the
+   model/endpoint names, the source model per hop, and the **expected reply** for a sample request.
+2. Run **Actions → Promote Model** (`environment` = `qa`, later `prod` with the `change_request` id).
+   After the reviewer approves, it runs the target environment's deploy job with a *UC model*
+   variant and `strict_endpoint_check`. The deployment **fails** unless the endpoint returns the
+   expected reply, and in that case `@champion` is not moved.
+3. Attach the run summary (source → target version, deploy-job run link, endpoint reply re-queried
+   from CI) to the change ticket.
+
+The same promotion can be done by hand in the target environment's app (Artifact → **UC model
+(promote)**); the endpoint check there is informational, not a gate.
+
+**Prerequisite (admin, once per environment):** the target workspace must be able to read the source
+catalog. The deploy SP needs `USE CATALOG`, `USE SCHEMA`, and `EXECUTE` on the source model, and the
+catalog must be bound to the workspace if catalog binding is used
+(`docs/Test_Prod_Promotion_Setup.md` Step 3c).
+
+**Rollback:** in the app, deploy a **New version** of the model with variant A = the previous
+**existing** version; or re-run the workflow with `source_version` = the previous source version.
 
 # 6. Monitoring and health checks
 

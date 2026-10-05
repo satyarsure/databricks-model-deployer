@@ -1,0 +1,15 @@
+{
+  "name": "protocol_intelligence",
+  "description": "PO / Protocol-Intelligence: classifies a procedure name as invasive or non-invasive (abbreviation mapping + Bio_ClinicalBERT embeddings + linear SVM).",
+  "uc_model": "protocol_intelligence",
+  "endpoint_name": "protocol_intelligence_endpoint",
+  "source": {
+    "qa": { "model": "protocol_intelligence_ui", "version": "champion" },
+    "prod": { "model": "protocol_intelligence", "version": "champion" }
+  },
+  "sample_input": { "inputs": ["Pregnancy Test", "EKG"] },
+  "sample_output": { "predictions": ["non-invasive", "non-invasive"] },
+  "compute": { "compute_type": "cpu", "size": "SMALL", "scale_to_zero": true },
+  "tags": {},
+  "permissions": {}
+}

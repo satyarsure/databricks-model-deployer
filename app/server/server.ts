@@ -18,15 +18,20 @@ const fieldSchema = z.object({
 const REGISTRY_VERSION = /^(\d+|production|staging|latest)$/i;
 // Blank = this workspace; otherwise a workspace host, with or without https://.
 const WORKSPACE_URL = /^(https:\/\/)?[A-Za-z0-9.-]+(:\d+)?\/?$/;
+// type === 'uc_model' (promotion from another catalog): a full catalog.schema.model name, and a
+// version number, an alias (optionally written @alias), or "latest".
+const UC_MODEL_NAME = /^[^.\s'"`]+\.[^.\s'"`]+\.[^.\s'"`]+$/;
+const UC_VERSION = /^(\d+|@?[A-Za-z_][A-Za-z0-9_]*)$/;
 
 const artifactSchema = z
   .object({
     label: z.string().optional(),
     source: z.enum(['artifact', 'existing']).default('artifact'),
-    type: z.enum(['s3', 'uc_volume', 'workspace_registry']).optional(),
+    type: z.enum(['s3', 'uc_volume', 'workspace_registry', 'uc_model']).optional(),
     path: z.string().optional(),
     version: z.union([z.number(), z.string()]).optional(),
     // type === 'workspace_registry': where the (legacy) registered model lives.
+    // type === 'uc_model': source_model_name / source_model_version name the UC model to copy.
     source_workspace_url: z.string().optional(),
     source_model_name: z.string().optional(),
     source_model_version: z.string().optional(),
@@ -77,6 +82,19 @@ const artifactSchema = z
             code: z.ZodIssueCode.custom,
             message: 'source workspace must be a workspace URL (https://<host>) or blank',
             path: ['source_workspace_url'],
+          });
+      } else if (a.type === 'uc_model') {
+        if (!UC_MODEL_NAME.test((a.source_model_name ?? '').trim()))
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: 'UC-model variant needs a full catalog.schema.model name',
+            path: ['source_model_name'],
+          });
+        if (!UC_VERSION.test((a.source_model_version ?? '').trim()))
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: 'UC-model version must be a number, an alias (e.g. champion), or latest',
+            path: ['source_model_version'],
           });
       } else if (!a.path || !a.path.trim())
         ctx.addIssue({

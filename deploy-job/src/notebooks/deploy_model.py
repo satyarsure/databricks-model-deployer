@@ -6,6 +6,7 @@
 # MAGIC    signature from the input/output schema, register each A/B variant to Unity Catalog.
 # MAGIC    A full MLflow model (from a workspace model registry, or an MLflow model folder in a
 # MAGIC    UC Volume) is registered **as-is** instead — its code, files and requirements kept.
+# MAGIC    A version of another UC model (dev → test → prod promotion) is **copied unchanged**.
 # MAGIC 2. **Validator**: load each registered pyfunc, smoke-test predict, optional `mlflow.evaluate`.
 # MAGIC 3. **Deployer**: create/update the serving endpoint (A/B traffic, compute, scale-to-zero,
 # MAGIC    tags, budget policy, inference tables), then query it once with the deployment's example.
@@ -294,10 +295,26 @@ def enable_ai_gateway(endpoint_name):
 # Post-deploy endpoint check: send the deployment's own example (the sample input, else the
 # schema's dummy row) to the live endpoint and record the reply on the timeline — the end-to-end
 # proof that the SERVED model answers, which matters most for models the job can't load itself
-# (see the validator). One request, so it also appears once in the inference table. Non-fatal.
+# (see the validator). One request, so it also appears once in the inference table. Non-fatal,
+# unless the spec sets strict_endpoint_check (CI promotion): then the reply must equal the sample
+# output, or the deployment fails before @champion moves.
 _ENVELOPE_KEYS = ("instances", "inputs", "dataframe_split", "dataframe_records")
 
+def _same(a, b):
+    """Equal as JSON values; numbers within a tiny tolerance (float round-trips)."""
+    import math
+    if isinstance(a, dict) and isinstance(b, dict):
+        return a.keys() == b.keys() and all(_same(a[k], b[k]) for k in a)
+    if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
+        return len(a) == len(b) and all(_same(x, y) for x, y in zip(a, b))
+    if isinstance(a, bool) or isinstance(b, bool):
+        return type(a) is type(b) and a == b
+    if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+        return math.isclose(a, b, rel_tol=1e-6, abs_tol=1e-9)
+    return a == b
+
 def endpoint_check(w, endpoint_name):
+    reply, failure = None, None
     try:
         if _si is not None:
             if isinstance(_si, dict) and any(k in _si for k in _ENVELOPE_KEYS):
@@ -314,9 +331,22 @@ def endpoint_check(w, endpoint_name):
         reply = w.api_client.do("POST", f"/serving-endpoints/{endpoint_name}/invocations", body=body)
         msg = f"endpoint check OK: {json.dumps(reply, default=str)[:300]}"
     except Exception as qe:
-        msg = f"endpoint check failed (non-fatal): {str(qe)[:300]}"
+        failure = f"endpoint check failed: {str(qe)[:300]}"
+        msg = failure if STRICT_ENDPOINT_CHECK else f"{failure} (non-fatal)"
+    if STRICT_ENDPOINT_CHECK and failure is None:
+        got = _unwrap_output(json.loads(json.dumps(reply, default=str)))
+        want = json.loads(json.dumps(SAMPLE_OUTPUT, default=str))
+        if not _same(got, want):
+            failure = (f"endpoint check MISMATCH: expected {json.dumps(want)[:200]}, "
+                       f"got {json.dumps(got)[:200]}")
+            msg = failure
+        else:
+            msg = f"endpoint check OK (matches the expected output): {json.dumps(reply, default=str)[:300]}"
     print(f"[deployer] {msg}")
     log_event("deployer", "IN_PROGRESS", msg, version=globals().get("model_version_str", ""))
+    if STRICT_ENDPOINT_CHECK and failure:
+        raise RuntimeError(f"{failure} — strict_endpoint_check is on, so the deployment fails "
+                           f"(the endpoint now serves this version; roll back if needed)")
 
 def log_event(stage, status, message="", version=""):
     """Append an immutable lifecycle event (full transition history / audit trail)."""
@@ -496,8 +526,15 @@ class WrappedModel(PythonModel):
 
 def localize_artifact(artifact):
     atype = (artifact.get("type") or "").lower()
-    path = artifact["path"]
+    path = artifact["path"].strip()
     if atype in ("uc_volume", "uc", "volume"):
+        # Accept "Volumes/..." and "dbfs:/Volumes/..." as "/Volumes/...". Without the leading slash
+        # the path is relative, so an MLflow model folder isn't detected and the deploy fails with
+        # FileNotFoundError.
+        if path.startswith("dbfs:"):
+            path = path[len("dbfs:"):]
+        if path.startswith("Volumes/"):
+            path = "/" + path
         return path
     if atype == "s3":
         import boto3
@@ -707,6 +744,55 @@ def register_as_is(model_dir, label, prov, source_run=None):
             print(f"[wrapper] model-version tag {k} skipped (non-fatal): {te}")
     return int(mv.version), env
 
+# ---- Promotion: copy a version of ANOTHER Unity Catalog model ------------------------------
+# Dev → test → prod promotion of an already-validated model. The version is copied unchanged
+# (files, signature, requirements, tags) with MlflowClient.copy_model_version, so the artifact
+# served here is byte-for-byte the one that passed in the lower environment — nothing is rebuilt.
+# The source model must be readable from this workspace: its catalog bound to this workspace,
+# with USE CATALOG / USE SCHEMA / EXECUTE granted to the deploy job's identity.
+def _resolve_uc_version(name, wanted):
+    """A concrete version number for "3", an alias ("champion" or "@champion") or "latest"."""
+    w = str(wanted or "").strip().lstrip("@")
+    if w.isdigit():
+        return w
+    if w.lower() == "latest":
+        v = latest_version(name)
+        if not v:
+            raise ValueError(f"'{name}' has no registered versions")
+        return str(v)
+    if not w:
+        raise ValueError("Source version must be a number, an alias (e.g. champion) or latest")
+    return str(client.get_model_version_by_alias(name, w).version)
+
+def copy_uc_model(art):
+    """Copy a source UC model version into this deployment's UC model. Returns (version, origin)."""
+    name = (art.get("source_model_name") or "").strip()
+    if name.count(".") != 2:
+        raise ValueError(f"Source model must be a full catalog.schema.model name (got '{name}')")
+    if name.lower() == uc_full.lower():
+        raise ValueError(f"Source and target are the same model ({uc_full}) — to serve one of its "
+                         f"versions, use an existing-version variant instead")
+    try:
+        src_version = _resolve_uc_version(name, art.get("source_model_version"))
+        mv = client.copy_model_version(f"models:/{name}/{src_version}", uc_full)
+    except Exception as e:
+        raise ValueError(
+            f"Could not copy {name} (version '{art.get('source_model_version')}') into {uc_full}: {e} "
+            f"— the source catalog must be readable from this workspace, with USE CATALOG, "
+            f"USE SCHEMA and EXECUTE granted to the deploy job's identity") from e
+    # Copied tags keep the source's own provenance (where it was first imported from); these record
+    # this promotion hop (the source version's own promoted_from_* tags show the hop before). Non-fatal.
+    prov = {"promoted_from_model": name, "promoted_from_version": src_version}
+    alias = str(art.get("source_model_version") or "").strip().lstrip("@")
+    if alias and not alias.isdigit() and alias.lower() != "latest":
+        prov["promoted_from_alias"] = alias
+    for k, v in prov.items():
+        try:
+            client.set_model_version_tag(uc_full, str(mv.version), k, v)
+        except Exception as te:
+            print(f"[wrapper] model-version tag {k} skipped (non-fatal): {te}")
+    return int(mv.version), f"{name} v{src_version}"
+
 # COMMAND ----------
 # ---- STAGE 1: Wrapper — wrap + register each variant ------------------------
 mlflow.set_registry_uri("databricks-uc")
@@ -759,6 +845,9 @@ _si = _parse_json_maybe(spec.get("sample_input"))
 _so = _parse_json_maybe(spec.get("sample_output"))
 SAMPLE_INPUT = _unwrap_input(_si) if _si is not None else None
 SAMPLE_OUTPUT = _unwrap_output(_so) if _so is not None else None
+# Opt-in (set by CI promotion, not the form): the post-deploy endpoint check must return exactly the
+# sample output, or the deployment FAILS — the gate that proves a promoted model answers correctly.
+STRICT_ENDPOINT_CHECK = bool(spec.get("strict_endpoint_check"))
 
 signature = build_signature(spec.get("input_schema", []), spec.get("output_schema", []))
 input_example = build_input_example(spec.get("input_schema", []))
@@ -770,6 +859,9 @@ artifacts = spec.get("artifacts", [])
 variant_versions = []
 
 try:
+    if STRICT_ENDPOINT_CHECK and (SAMPLE_INPUT is None or SAMPLE_OUTPUT is None):
+        raise ValueError("strict_endpoint_check needs a sample input and sample output to compare "
+                         "the endpoint's reply against")
     for i, art in enumerate(artifacts):
         label = art.get("label") or chr(ord("A") + i)
         traffic = art.get("traffic_percent", 100 // max(len(artifacts), 1))
@@ -781,6 +873,14 @@ try:
             variant_versions.append({"label": label, "version": version, "traffic_percent": traffic,
                                      "as_is": True})
             print(f"[wrapper] variant {label} <- existing {uc_full} v{version}")
+            continue
+        # Promotion: a version of another UC model (e.g. the dev catalog's), copied unchanged.
+        if (art.get("type") or "").lower() == "uc_model":
+            version, origin = copy_uc_model(art)
+            variant_versions.append({"label": label, "version": version, "traffic_percent": traffic,
+                                     "as_is": True})
+            print(f"[wrapper] copied {origin} -> {uc_full} v{version} (variant {label})")
+            log_event("wrapper", "IN_PROGRESS", f"variant {label}: copied {origin} unchanged as v{version}")
             continue
         print(f"[wrapper] variant {label} <- {art.get('path') or art.get('source_model_name')}")
         # A full MLflow model (workspace registry, or an MLflow model folder in a Volume) is

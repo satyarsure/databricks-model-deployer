@@ -572,6 +572,43 @@ naming the exact secret keys.
    house_price_model_endpoint to finish"* and then *"updating …"* once the first finishes; it does
    **not** fail with an "endpoint is being updated" error. Both rows end **Complete**.
 
+## TC14 — Promote a model from another catalog (UC model source) ⭐
+
+The dev → test → prod path: copy an already-validated UC model version, unchanged, into another
+catalog/schema and serve it. It can be **rehearsed inside one workspace** (copy into a second model
+name) before the test environment exists.
+
+**TC14a — UI rehearsal in dev**
+
+| field | value |
+|---|---|
+| Model Name | `protocol-intelligence-promoted` |
+| Artifact | **UC model (promote)** · Source model `<catalog>.<schema>.protocol_intelligence_ui` · Version `champion` (or `1`) |
+| **Model contract** | **Sample input / output** |
+| UC Model name | `<catalog>` · `<schema>` · `protocol_intelligence_promoted` |
+| Compute | CPU · SMALL · Scale-to-zero ON |
+
+Sample input: `{"inputs": ["Pregnancy Test", "EKG"]}` — Sample output: `{"predictions": ["non-invasive", "non-invasive"]}`
+
+**Expected:** the wrapper event reads *"variant A: copied <catalog>.<schema>.protocol_intelligence_ui vN
+unchanged as v1"*; the validator notes the model needs packages the job lacks (torch — non-fatal); the
+deployer ends with *"endpoint check OK: {"predictions": ["non-invasive", "non-invasive"]}"*. In
+Catalog Explorer the new version carries `promoted_from_model` / `promoted_from_version` (plus
+`promoted_from_alias` when an alias was used) **and** the source's own `source_*` tags.
+
+**TC14b — CI promotion (after the qa environment exists):** run **Actions → Promote Model** with
+`environment = qa`. **Expected:** the run waits for the reviewer approval, then the job summary shows
+`SUCCESS`, the source/target versions, the deploy-job run link, and the endpoint reply re-queried
+from CI. The deployment also appears in the qa app's **Deployed Models** list.
+
+**TC14c — negative: the strict gate.** Run the workflow with a spec whose `sample_output` is wrong
+(e.g. `["invasive", "invasive"]`, on a branch). **Expected:** the deployer FAILS with *"endpoint check
+MISMATCH: expected …, got …"*, the workflow run fails, and `@champion` is **not** moved.
+
+**TC14d — negative: bad source.** In the form, set Source model to the model being deployed →
+*"The source UC model is the model being deployed"*. Set a source the job identity can't read →
+the wrapper FAILS with *"Could not copy … the source catalog must be readable from this workspace"*.
+
 ## What to check in the UI (every case)
 
 - **Deployed Models** row appears **immediately** as *Deploy in progress* with a real "submitted"

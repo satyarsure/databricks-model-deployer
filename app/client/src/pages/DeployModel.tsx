@@ -5,20 +5,22 @@ import { useApiQuery } from '../lib/useApiQuery';
 import type { DeploymentRow, PendingDeployment } from '../types';
 
 // ---- shared types -----------------------------------------------------------
-type ArtifactType = 's3' | 'uc_volume' | 'workspace_registry';
+type ArtifactType = 's3' | 'uc_volume' | 'workspace_registry' | 'uc_model';
 type VariantSource = 'artifact' | 'existing';
 type Size = 'SMALL' | 'MEDIUM' | 'LARGE';
 interface Artifact {
   label: string;
-  // 'artifact' = a new S3/UC-Volume artifact (wrapped + registered as a new version), or a
-  // workspace-registry model version (imported as-is, with its own code/files/requirements);
+  // 'artifact' = a new S3/UC-Volume artifact (wrapped + registered as a new version), a
+  // workspace-registry model version (imported as-is, with its own code/files/requirements), or
+  // a version of another UC model (copied unchanged — dev → test → prod promotion);
   // 'existing' = an already-registered version of the same UC model (referenced as-is,
   // for a champion-vs-challenger A/B test).
   source: VariantSource;
   type: ArtifactType;
   path: string;
   version: string; // used when source === 'existing'
-  // Used when type === 'workspace_registry'. A blank workspace URL means this workspace.
+  // Used when type === 'workspace_registry' (a blank workspace URL means this workspace) and
+  // type === 'uc_model' (full catalog.schema.model name; version number, alias, or latest).
   source_workspace_url?: string;
   source_model_name?: string;
   source_model_version?: string;
@@ -27,6 +29,9 @@ interface Artifact {
 
 // Registry version: a number, a legacy stage, or "latest" (the job resolves it to a number).
 const REGISTRY_VERSION = /^(\d+|production|staging|latest)$/i;
+// UC model to promote from: catalog.schema.model, and a version number, alias, or "latest".
+const UC_MODEL_NAME = /^[^.\s'"`]+\.[^.\s'"`]+\.[^.\s'"`]+$/;
+const UC_VERSION = /^(\d+|@?[A-Za-z_][A-Za-z0-9_]*)$/;
 
 // Also used as the shape of a saved draft's `draft_json` (the raw form state).
 export interface Prefill {
@@ -161,7 +166,10 @@ function parsePrefill(row: DeploymentRow | null): Prefill | null {
       ? rawArts.map((a, i) => ({
           label: a.label ?? String.fromCharCode(65 + i),
           source: a.source === 'existing' ? 'existing' : 'artifact',
-          type: a.type === 's3' || a.type === 'workspace_registry' ? a.type : 'uc_volume',
+          type:
+            a.type === 's3' || a.type === 'workspace_registry' || a.type === 'uc_model'
+              ? a.type
+              : 'uc_volume',
           path: a.path ?? '',
           version: a.version != null ? String(a.version) : '',
           source_workspace_url: a.source_workspace_url ?? '',
@@ -487,12 +495,20 @@ export function DeployModel({
   function validate(): string | null {
     if (!name.trim()) return 'Model name is required.';
     const fromRegistry = (a: Artifact) => a.source === 'artifact' && a.type === 'workspace_registry';
-    if (artifacts.some((a) => a.source === 'artifact' && !fromRegistry(a) && !a.path.trim()))
+    const fromUc = (a: Artifact) => a.source === 'artifact' && a.type === 'uc_model';
+    if (artifacts.some((a) => a.source === 'artifact' && !fromRegistry(a) && !fromUc(a) && !a.path.trim()))
       return 'Every new-artifact variant needs a path.';
     if (artifacts.some((a) => fromRegistry(a) && !(a.source_model_name ?? '').trim()))
       return 'Every workspace-registry variant needs a registered model name.';
     if (artifacts.some((a) => fromRegistry(a) && !REGISTRY_VERSION.test((a.source_model_version ?? '').trim())))
       return 'Workspace-registry version must be a number, Production, Staging, or latest.';
+    if (artifacts.some((a) => fromUc(a) && !UC_MODEL_NAME.test((a.source_model_name ?? '').trim())))
+      return 'Every UC-model variant needs a full source model name (catalog.schema.model).';
+    if (artifacts.some((a) => fromUc(a) && !UC_VERSION.test((a.source_model_version ?? '').trim())))
+      return 'UC-model version must be a number, an alias (e.g. champion), or latest.';
+    const target = `${ucCatalog.trim()}.${ucSchema.trim()}.${ucModel.trim()}`.toLowerCase();
+    if (artifacts.some((a) => fromUc(a) && (a.source_model_name ?? '').trim().toLowerCase() === target))
+      return 'The source UC model is the model being deployed — pick an existing version instead.';
     if (artifacts.some((a) => a.source === 'existing' && !/^\d+$/.test(a.version.trim())))
       return 'Every existing-model variant needs a version.';
     if (artifacts.length > 1 && trafficTotal !== 100)
@@ -582,13 +598,22 @@ export function DeployModel({
                   source_model_version: (a.source_model_version ?? '').trim(),
                   traffic_percent: Number(a.traffic_percent) || 0,
                 }
-              : {
-                  label: a.label,
-                  source: 'artifact' as const,
-                  type: a.type,
-                  path: a.path.trim(),
-                  traffic_percent: Number(a.traffic_percent) || 0,
-                },
+              : a.type === 'uc_model'
+                ? {
+                    label: a.label,
+                    source: 'artifact' as const,
+                    type: a.type,
+                    source_model_name: (a.source_model_name ?? '').trim(),
+                    source_model_version: (a.source_model_version ?? '').trim(),
+                    traffic_percent: Number(a.traffic_percent) || 0,
+                  }
+                : {
+                    label: a.label,
+                    source: 'artifact' as const,
+                    type: a.type,
+                    path: a.path.trim(),
+                    traffic_percent: Number(a.traffic_percent) || 0,
+                  },
         ),
         input_schema: contractMode === 'schema' && inParsed.ok ? inParsed.fields : [],
         output_schema: contractMode === 'schema' && outParsed.ok ? outParsed.fields : [],
@@ -730,8 +755,8 @@ export function DeployModel({
           required
           hint={
             canUseExisting
-              ? 'One or more variants. Each can be a new artifact (S3, UC Volume, or a workspace-registry model) or an existing registered version of this model — switch with the toggle. Add multiple to A/B test with a traffic split that totals 100%.'
-              : 'One or more model artifacts (S3, UC Volume, or a workspace-registry model). A file on your computer: upload it to a UC Volume first, then enter its path. Add multiple variants to A/B test with a traffic split that totals 100%.'
+              ? 'One or more variants. Each can be a new artifact (S3, UC Volume, a workspace-registry model, or a UC model to promote) or an existing registered version of this model — switch with the toggle. Add multiple to A/B test with a traffic split that totals 100%.'
+              : 'One or more model artifacts (S3, UC Volume, a workspace-registry model, or a UC model to promote from another catalog). A file on your computer: upload it to a UC Volume first, then enter its path. Add multiple variants to A/B test with a traffic split that totals 100%.'
           }
         >
           <div className="space-y-3">
@@ -791,10 +816,45 @@ export function DeployModel({
                           { value: 's3', label: 'S3 Bucket' },
                           { value: 'uc_volume', label: 'UC Volume' },
                           { value: 'workspace_registry', label: 'Workspace registry' },
+                          { value: 'uc_model', label: 'UC model (promote)' },
                         ]}
                       />
                     </div>
-                    {a.type === 'workspace_registry' ? (
+                    {a.type === 'uc_model' ? (
+                      <div className="space-y-2">
+                        <div className="rounded bg-muted/50 px-2 py-1 text-xs text-muted-foreground">
+                          Promote a version of another Unity Catalog model — e.g. the model in the
+                          dev catalog — into this environment. It is copied unchanged (files,
+                          signature, and pip requirements), so the version served here is exactly
+                          the one validated before. The source catalog must be readable from this
+                          workspace.
+                        </div>
+                        <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                          <div className="sm:col-span-2">
+                            <Label className="mb-1 block text-xs text-muted-foreground">
+                              Source model
+                            </Label>
+                            <input
+                              className={inputCls}
+                              placeholder="catalog.schema.model"
+                              value={a.source_model_name ?? ''}
+                              onChange={(e) => setArtifact(i, { source_model_name: e.target.value })}
+                            />
+                          </div>
+                          <div>
+                            <Label className="mb-1 block text-xs text-muted-foreground">
+                              Version or alias
+                            </Label>
+                            <input
+                              className={inputCls}
+                              placeholder="e.g. 3, champion, latest"
+                              value={a.source_model_version ?? ''}
+                              onChange={(e) => setArtifact(i, { source_model_version: e.target.value })}
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    ) : a.type === 'workspace_registry' ? (
                       <div className="space-y-2">
                         <div className="rounded bg-muted/50 px-2 py-1 text-xs text-muted-foreground">
                           A model in a workspace (legacy) model registry. It is copied into Unity
