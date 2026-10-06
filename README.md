@@ -1,7 +1,8 @@
 # databricks-model-deployer
 
-A Databricks App (React/AppKit) that lets users hand in an external model artifact from **S3** or a
-**Unity Catalog Volume** and publish it to **Databricks Model Serving** — reusing the MLflow
+A Databricks App (React/AppKit) that lets users hand in an external model artifact from a **Unity
+Catalog Volume** (or an **S3** path, read through the UC external volume registered for it) and
+publish it to **Databricks Model Serving** — reusing the MLflow
 deployment pattern from Genesis Workbench.
 
 A parameterized workflow job wraps the artifact as an MLflow **pyfunc**, registers it to **Unity
@@ -27,7 +28,8 @@ React/AppKit app
                             so a real row shows instantly, then (2) triggers the deploy job.
                                                    │
 Deploy job (DABs, serverless) — one notebook, three stages:
-   Wrapper    → load artifact(s), wrap as MLflow pyfunc, build the SIGNATURE (from a columnar schema,
+   Wrapper    → resolve any s3:// path to its UC external volume (/Volumes/…), load artifact(s),
+                wrap as MLflow pyfunc, build the SIGNATURE (from a columnar schema,
                 OR inferred from a sample input/output — see "Model contract" below), register each
                 new-artifact variant to UC (a variant may instead reference an existing version)
    Validator  → load the registered pyfunc, smoke-test predict (non-fatal — surfaced on the timeline
@@ -147,9 +149,33 @@ policy. The Lakebase resource paths are composed from the project **name**, so y
   `lakebase_project` (branch/database paths composed from it). The app declares a `postgres` resource
   (not a warehouse); the Apps platform injects `PGHOST`/`PGDATABASE`/`PGUSER`/… and `LAKEBASE_ENDPOINT`.
 
-The **Experiment** and **Serverless usage policy** are also Deploy-form fields, but **optional
-overrides** — left blank, a deployment uses the environment's configured `experiment` /
-`budget_policy_id`.
+The **Experiment** and **Serverless usage policy** are also **required** Deploy-form fields,
+**pre-filled** with the environment's configured defaults (the job publishes them to the Lakebase
+`model_deployer_config` table): Experiment as `<experiment>/<model name>`, the policy as
+`budget_policy_id`. Edit either to override for a single deployment.
+
+## S3 artifacts (via UC external volumes)
+
+An S3 artifact is **not** downloaded with AWS credentials. Every S3 location is expected to be
+registered in Unity Catalog as an **external volume**, and the deploy job reads the artifact through
+it — exactly like a UC Volume artifact. At the start of the run the job looks up the covering volume
+in `system.information_schema.volumes` (longest `storage_location` prefix wins), rewrites
+`s3://bucket/prefix/model.pkl` → `/Volumes/<catalog>/<schema>/<volume>/model.pkl`, records the
+resolution on the lifecycle timeline, and writes the volume path back to `model_deployments
+.artifacts_json` (keeping the original as `s3_path`), so a new version prefills the **volume** path.
+An S3 evaluation dataset is resolved the same way. `information_schema` only lists volumes the job's
+run-as identity holds a privilege on, so that identity needs **`READ VOLUME`** on the external
+volume; if no volume covers the path, the deployment fails at the wrapper stage with a clear error.
+
+**Artifact-source flag.** Alongside `deploy_spec`, the app passes the job an `artifact_sources`
+parameter — the distinct source types of the deployment's new-artifact variants (e.g. `s3`,
+`uc_volume`, `s3,uc_volume`; blank when every variant is an existing version). The notebook runs only
+the handlers for those types (`ARTIFACT_SOURCE_HANDLERS`), so the S3 lookup is skipped for a
+UC-Volume-only deployment. If the parameter is blank (a manual run) it is derived from `deploy_spec`,
+and a type the spec uses is never skipped even if the flag omits it; an unknown type fails fast. To
+add a source type: extend `ARTIFACT_TYPES` in `app/server/server.ts`, add the form option in
+`DeployModel.tsx`, and register a handler in the notebook that turns the artifact into a `/Volumes`
+path.
 
 ## Deploy
 

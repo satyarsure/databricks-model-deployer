@@ -2,8 +2,8 @@
 # MAGIC %md
 # MAGIC # Model Deployer — single-notebook pipeline
 # MAGIC Wrapper → Validator → Deployer, mirroring Genesis Workbench's `deploy_model.py`.
-# MAGIC 1. **Wrapper**: load each artifact (UC Volume / S3), wrap as an MLflow pyfunc with a
-# MAGIC    signature from the input/output schema, register each A/B variant to Unity Catalog.
+# MAGIC 1. **Wrapper**: resolve any S3 path to its UC external volume, load each artifact, wrap as an
+# MAGIC    MLflow pyfunc with a signature from the input/output schema, register each A/B variant to UC.
 # MAGIC 2. **Validator**: load each registered pyfunc, smoke-test predict, optional `mlflow.evaluate`.
 # MAGIC 3. **Deployer**: create/update the serving endpoint (A/B traffic, compute, scale-to-zero,
 # MAGIC    tags, budget policy, inference tables).
@@ -59,6 +59,12 @@ dbutils.widgets.text("pg_database", "databricks_postgres")
 dbutils.widgets.text("pg_endpoint", "")        # endpoint resource path (for the DB credential)
 dbutils.widgets.text("pg_schema", "model_deployer")
 dbutils.widgets.text("app_sp", "")             # app service-principal client id to grant SELECT
+# This job RUN's id, supplied by the bundle as the {{job.run_id}} dynamic value reference.
+dbutils.widgets.text("job_run_id", "")
+# Comma-separated artifact source types in this deployment (e.g. "s3", "uc_volume", "s3,uc_volume"),
+# sent by the app so source-specific steps run only when needed (see ARTIFACT_SOURCE_HANDLERS).
+# Blank (an older app / a manual run) -> derived from deploy_spec.artifacts.
+dbutils.widgets.text("artifact_sources", "")
 
 CATALOG = dbutils.widgets.get("catalog")
 SCHEMA = dbutils.widgets.get("schema")
@@ -92,10 +98,22 @@ if not _exp and EXPERIMENT_DEFAULT:
     _exp = EXPERIMENT_DEFAULT.rstrip("/") + "/" + (str(spec.get("name") or "model").strip() or "model")
 EXPERIMENT_RESOLVED = _exp
 POLICY_RESOLVED = (spec.get("serverless_usage_policy") or "").strip() or SERVERLESS_POLICY_DEFAULT
-try:
-    run_id = str(dbutils.notebook.entry_point.getDbutils().notebook().getContext().jobId().get())
-except Exception:
-    run_id = ""
+# The job RUN id (not the job id), so the status row points at the exact run. Comes from the
+# {{job.run_id}} base parameter; falls back to the notebook context when that isn't set (e.g. an
+# older job definition, or an interactive run where the reference isn't substituted).
+def _job_run_id():
+    rid = dbutils.widgets.get("job_run_id").strip()
+    if rid and not rid.startswith("{{"):
+        return rid
+    try:
+        attrs = json.loads(
+            dbutils.notebook.entry_point.getDbutils().notebook().getContext().safeToJson()
+        ).get("attributes", {})
+        return str(attrs.get("multitaskParentRunId") or attrs.get("rootRunId")
+                   or attrs.get("currentRunId") or "")
+    except Exception:
+        return ""
+run_id = _job_run_id()
 
 # Pin the SERVED model's environment to the exact versions in use here, so the serving
 # container (which is rebuilt from these requirements — e.g. on scale-to-zero cold starts)
@@ -415,6 +433,96 @@ except Exception as de:
 log_event("wrapper", "IN_PROGRESS", "deployment submitted")
 
 # COMMAND ----------
+# ---- Artifact sources: per-source-type preparation --------------------------
+# The app sends `artifact_sources` (the distinct artifact types in this deployment). Each type has
+# a handler below that turns an artifact into a loadable /Volumes path; only the handlers for the
+# types present run, so e.g. the S3 lookup is skipped entirely for a UC-Volume-only deployment.
+# To add a new source type: add it to ARTIFACT_TYPES in app/server/server.ts (+ a form option in
+# DeployModel.tsx), then register a handler here.
+#
+# S3: every S3 location is registered in UC as an EXTERNAL VOLUME, so an S3 artifact is read through
+# that volume — exactly like a UC Volume artifact (UC-governed, no boto3 / AWS credentials on the
+# job). The covering volume is looked up in system.information_schema.volumes (longest
+# storage_location prefix wins), the s3:// path is rewritten to /Volumes/<cat>/<schema>/<vol>/<rest>,
+# and the resolved path is written back to the status row so the app shows (and a new version
+# prefills) the volume location. information_schema only lists volumes the job's run-as identity
+# holds a privilege on, so that identity needs READ VOLUME on the external volume.
+_S3_SCHEME = re.compile(r"^s3[an]?://", re.IGNORECASE)
+
+def s3_to_volume_path(s3_path):
+    p = _S3_SCHEME.sub("s3://", str(s3_path).strip()).rstrip("/")
+    rows = spark.sql(
+        """WITH v AS (
+             SELECT volume_catalog, volume_schema, volume_name,
+                    regexp_replace(regexp_replace(storage_location, '^[sS]3[aAnN]?://', 's3://'),
+                                   '/+$', '') AS loc
+             FROM system.information_schema.volumes
+             WHERE volume_type = 'EXTERNAL' AND storage_location IS NOT NULL)
+           SELECT * FROM v
+           WHERE :p = loc OR startswith(:p, concat(loc, '/'))
+           ORDER BY length(loc) DESC LIMIT 1""",
+        args={"p": p},
+    ).collect()
+    if not rows:
+        raise ValueError(
+            f"No Unity Catalog external volume covers {s3_path} (or the job's identity has no access "
+            f"to it). Register the S3 location as an external volume and grant READ VOLUME on it.")
+    r = rows[0]
+    rest = p[len(r["loc"]):].lstrip("/")
+    return "/".join(["/Volumes", r["volume_catalog"], r["volume_schema"], r["volume_name"]]
+                    + ([rest] if rest else []))
+
+def _prepare_uc_volume(art):
+    return None  # already a /Volumes path, read in place
+
+def _prepare_s3(art):
+    s3_path = art.get("path") or ""
+    vol = s3_to_volume_path(s3_path)
+    art.update(type="uc_volume", path=vol, s3_path=s3_path)
+    return f"{s3_path} -> {vol}"
+
+# source type -> handler(artifact) that mutates the artifact into a /Volumes path and returns a
+# note for the timeline (or None when there's nothing to report).
+ARTIFACT_SOURCE_HANDLERS = {"uc_volume": _prepare_uc_volume, "s3": _prepare_s3}
+
+_new_artifacts = [a for a in (spec.get("artifacts", []) or []) if a.get("source") != "existing"]
+_spec_sources = {(a.get("type") or "").lower() for a in _new_artifacts}
+ARTIFACT_SOURCES = {t.strip().lower() for t in dbutils.widgets.get("artifact_sources").split(",") if t.strip()}
+if not ARTIFACT_SOURCES:
+    ARTIFACT_SOURCES = set(_spec_sources)
+elif not _spec_sources <= ARTIFACT_SOURCES:
+    # Never silently skip an artifact: if the flag misses a type the spec uses, handle both.
+    print(f"[sources] artifact_sources={sorted(ARTIFACT_SOURCES)} misses {sorted(_spec_sources - ARTIFACT_SOURCES)} "
+          f"from deploy_spec; handling the union")
+    ARTIFACT_SOURCES |= _spec_sources
+print(f"[sources] artifact sources: {sorted(ARTIFACT_SOURCES) or ['(existing versions only)']}")
+
+_notes = []
+try:
+    _unknown = ARTIFACT_SOURCES - set(ARTIFACT_SOURCE_HANDLERS)
+    if _unknown:
+        raise ValueError(f"Unsupported artifact source type(s): {sorted(_unknown)} "
+                         f"(supported: {sorted(ARTIFACT_SOURCE_HANDLERS)})")
+    for art in _new_artifacts:
+        _note = ARTIFACT_SOURCE_HANDLERS[(art.get("type") or "").lower()](art)
+        if _note:
+            _notes.append(_note)
+    # An S3 evaluation dataset is read through its external volume too.
+    _ev = (spec.get("eval_dataset") or "").strip()
+    if _S3_SCHEME.match(_ev):
+        spec["eval_dataset"] = s3_to_volume_path(_ev)
+        _notes.append(f'{_ev} -> {spec["eval_dataset"]}')
+    if _notes:
+        print("[wrapper] resolved to UC volume: " + "; ".join(_notes))
+        merge_status(artifacts_json=json.dumps(spec.get("artifacts", [])),
+                     eval_dataset=spec.get("eval_dataset"))
+        log_event("wrapper", "IN_PROGRESS", "resolved to UC volume: " + "; ".join(_notes))
+except Exception as e:
+    merge_status(status="FAILED", stage="wrapper", error_message=f"{e}\n{traceback.format_exc()[:1500]}")
+    log_event("wrapper", "FAILED", str(e))
+    raise
+
+# COMMAND ----------
 # ---- Signature / example helpers --------------------------------------------
 TYPE_MAP = {"double": "double", "float": "float", "int": "integer", "integer": "integer",
             "long": "long", "bigint": "long", "string": "string", "str": "string", "text": "string",
@@ -460,17 +568,11 @@ class WrappedModel(PythonModel):
         return arr.tolist() if arr.ndim <= 1 else pd.DataFrame(preds)
 
 def localize_artifact(artifact):
+    # Every source type was already prepared into a /Volumes path by its ARTIFACT_SOURCE_HANDLERS
+    # entry (e.g. S3 -> its UC external volume), so the artifact is read in place.
     atype = (artifact.get("type") or "").lower()
-    path = artifact["path"]
     if atype in ("uc_volume", "uc", "volume"):
-        return path
-    if atype == "s3":
-        import boto3
-        from urllib.parse import urlparse
-        u = urlparse(path)
-        local = f"/tmp/{os.path.basename(u.path) or 'artifact'}"
-        boto3.client("s3").download_file(u.netloc, u.path.lstrip("/"), local)
-        return local
+        return artifact["path"]
     raise ValueError(f"Unsupported artifact type: {atype}")
 
 def load_model_object(local_path):

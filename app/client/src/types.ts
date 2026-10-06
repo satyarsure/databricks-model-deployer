@@ -1,5 +1,5 @@
-// One row of the model_deployments table (matches config/queries/deployments.sql).
-// All columns come back as string | null from the analytics query.
+// One row of the Lakebase model_deployments table, as returned by GET /api/deployments
+// (server/server.ts). Columns are nullable; scale_to_zero is cast to text in the query.
 export interface DeploymentRow {
   deployment_id: string;
   model_name: string | null;

@@ -6,6 +6,11 @@ import { z } from 'zod';
 const PG_SCHEMA = process.env.PG_APP_SCHEMA || 'model_deployer';
 
 // ---- Deploy spec validation -------------------------------------------------
+// Artifact source types the deploy job can prepare (one handler each in the notebook's
+// ARTIFACT_SOURCE_HANDLERS). To add a new source, extend this list, add a form option, and
+// register its handler in the notebook.
+const ARTIFACT_TYPES = ['s3', 'uc_volume'] as const;
+
 const fieldSchema = z.object({
   name: z.string().min(1),
   type: z.string().min(1),
@@ -18,7 +23,7 @@ const artifactSchema = z
   .object({
     label: z.string().optional(),
     source: z.enum(['artifact', 'existing']).default('artifact'),
-    type: z.enum(['s3', 'uc_volume']).optional(),
+    type: z.enum(ARTIFACT_TYPES).optional(),
     path: z.string().optional(),
     version: z.union([z.number(), z.string()]).optional(),
     traffic_percent: z.number().min(0).max(100).optional(),
@@ -51,6 +56,14 @@ const artifactSchema = z
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           message: 'artifact variant needs a path',
+          path: ['path'],
+        });
+      // An S3 artifact is read through the UC external volume covering it (the deploy job
+      // resolves s3://… to /Volumes/…), so it must be a real S3 URI.
+      else if (a.type === 's3' && !/^s3[an]?:\/\//i.test(a.path.trim()))
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'S3 artifact path must start with s3://',
           path: ['path'],
         });
     }
@@ -123,6 +136,7 @@ createApp({
           params: z.object({
             deploy_spec: z.string(),
             deployment_id: z.string(),
+            artifact_sources: z.string(),
           }),
         },
       },
@@ -397,9 +411,18 @@ createApp({
         const deploymentId = Date.now();
         const fullSpec = { ...spec, deployed_by: email };
 
+        // Distinct source types of the NEW-artifact variants (e.g. "s3,uc_volume"; "" when every
+        // variant is an existing version), so the job runs only the source-specific steps needed.
+        const artifactSources = [
+          ...new Set(spec.artifacts.filter((a) => a.source !== 'existing' && a.type).map((a) => a.type)),
+        ]
+          .sort()
+          .join(',');
+
         const result = await appkit.jobs('default').runNow({
           deploy_spec: JSON.stringify(fullSpec),
           deployment_id: String(deploymentId),
+          artifact_sources: artifactSources,
         });
         if (!result.ok) {
           res

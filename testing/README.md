@@ -55,10 +55,10 @@ path, an A/B traffic split, and two failure paths — every stage of
 > governance tags come first; if over 20, the auto-added `deployed_by`/`gpu_type`/`application` are
 > dropped (logged on the run).
 >
-> **Experiment name** and **Serverless usage policy** are now **optional overrides** — leave either
-> blank to use the environment's configured default (`var.experiment` / `var.budget_policy_id`). The
-> `<experiment>` / `<budget-policy-id>` values in the tables below are only needed if you want to
-> override for that test; otherwise leave them blank. The endpoint always carries the standard
+> **Experiment name** and **Serverless usage policy** are **required** and arrive **pre-filled**
+> with the environment's configured defaults (`var.experiment`/`<model name>` and
+> `var.budget_policy_id`). The `<experiment>` / `<budget-policy-id>` values in the tables below are
+> only needed if you want to override for that test; otherwise keep the pre-filled values. The endpoint always carries the standard
 > chargeback tags (`application` / `cost_center` / `team` / `environment`) from the deploy config,
 > and any form **Tags** are merged on top (form values win on key collisions).
 >

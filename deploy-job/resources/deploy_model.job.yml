@@ -20,6 +20,9 @@ resources:
             base_parameters:
               deploy_spec: "{}"
               deployment_id: "-1"
+              # Distinct artifact source types (e.g. "s3,uc_volume"); sent by the app per run.
+              # Blank -> the notebook derives it from deploy_spec.
+              artifact_sources: ""
               catalog: ${var.catalog}
               schema: ${var.schema}
               # Default MLflow experiment (the form can override per deployment).
@@ -35,6 +38,8 @@ resources:
               pg_endpoint: projects/${var.lakebase_project}/branches/${var.lakebase_branch_name}/endpoints/${var.lakebase_endpoint_name}
               pg_schema: ${var.pg_schema}
               app_sp: ${var.app_sp}
+              # This run's id (dynamic value reference), recorded as run_id on the status row.
+              job_run_id: "{{job.run_id}}"
 
       # Reproducible dependency set for serverless compute. environment_version pins the
       # Python runtime; dependencies install the exact versions from the bundled

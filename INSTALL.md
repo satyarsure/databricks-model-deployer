@@ -94,9 +94,9 @@ The app bundle's `values.local.yml` mirrors this with `root_path`, `app_name`, `
 handle), and `lakebase_project` per target (each env's `job_id` comes from that env's deploy-job
 deploy — step 5). The `environment` tag is added automatically from the target name (`${bundle.target}`).
 
-> **Experiment & serverless policy are also form fields** — but now **optional overrides**. Left
-> blank in the Deploy form, a deployment uses the environment's configured `experiment` /
-> `budget_policy_id`. Fill them in the form only to override for a single deployment.
+> **Experiment & serverless policy are also required form fields**, **pre-filled** with the
+> environment's configured `experiment` (as `<experiment>/<model name>`) and `budget_policy_id`.
+> Edit them in the form only to override for a single deployment.
 
 **3. One CLI profile per environment** (each is usually a different workspace = different host):
 
@@ -180,7 +180,11 @@ block and the `--profile` change. Store each environment's real values in your s
 
 **The deploy job's run identity** (the deploying user, or a job-owner SP) needs:
 - `CREATE MODEL` / `USE` on `<CATALOG>.<SCHEMA>`, permission to create **serving endpoints**, read
-  access to wherever artifacts live (the UC volume and/or S3), and use of the budget policy.
+  access to wherever artifacts live, and use of the budget policy. Artifacts are always read through
+  Unity Catalog: an **S3** artifact must be covered by a UC **external volume** (the job resolves the
+  `s3://` path to `/Volumes/…` via `system.information_schema.volumes`), so this identity needs
+  **`READ VOLUME`** (plus `USE CATALOG` / `USE SCHEMA`) on those volumes — no AWS credentials or
+  instance profile are needed on the job.
 - It also applies the deploy form's optional **endpoint permissions** (and grants the submitting
   user `CAN_MANAGE`); as the endpoint's creator it already has `CAN_MANAGE`, so no extra grant is
   needed (a permission-set failure is non-fatal and never fails the deployment).

@@ -301,7 +301,7 @@ function Toggle({
 }
 
 // Dropdown of registered versions for a UC model (variant A of an A/B test). Sourced from
-// the model_versions analytics query (versions this app has deployed for that model).
+// GET /api/model-versions (versions this app has successfully deployed for that model).
 function VersionPicker({
   ucFull,
   value,
@@ -474,6 +474,12 @@ export function DeployModel({
     if (!name.trim()) return 'Model name is required.';
     if (artifacts.some((a) => a.source === 'artifact' && !a.path.trim()))
       return 'Every new-artifact variant needs a path.';
+    if (
+      artifacts.some(
+        (a) => a.source === 'artifact' && a.type === 's3' && !/^s3[an]?:\/\//i.test(a.path.trim()),
+      )
+    )
+      return 'S3 artifact paths must start with s3://.';
     if (artifacts.some((a) => a.source === 'existing' && !/^\d+$/.test(a.version.trim())))
       return 'Every existing-model variant needs a version.';
     if (artifacts.length > 1 && trafficTotal !== 100)
@@ -774,6 +780,15 @@ export function DeployModel({
                       value={a.path}
                       onChange={(e) => setArtifact(i, { path: e.target.value })}
                     />
+                    {a.type === 's3' && (
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        Read through the Unity Catalog external volume registered for this S3
+                        location — the deploy job resolves it to its{' '}
+                        <span className="font-mono">/Volumes/…</span> path, which the deployment
+                        then shows. The S3 location must be covered by an external volume you can
+                        read.
+                      </p>
+                    )}
                   </>
                 )}
                 {multi && (
@@ -908,7 +923,7 @@ export function DeployModel({
 
         <Section
           title="Evaluation dataset location"
-          hint="Optional — leave blank to skip. If given, an S3/UC Volume CSV or Parquet with the model's features plus a target column named like the output field; validated with mlflow.evaluate."
+          hint="Optional — leave blank to skip. If given, a UC Volume (or S3, resolved to its external volume) CSV or Parquet with the model's features plus a target column named like the output field; validated with mlflow.evaluate."
         >
           <input
             className={inputCls}

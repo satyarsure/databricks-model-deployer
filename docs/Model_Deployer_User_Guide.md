@@ -59,21 +59,21 @@ becoming ready).
 |---|---|---|
 | **Model Name** | Yes | A friendly name for the deployment (e.g. `house-price-regressor`). Shown on the board. |
 | **Description** | No | Free text describing the model. |
-| **Artifact** | Yes | Where the model file lives — a **UC Volume** path or an **S3** path (see section 6). For A/B tests you can add more than one, or reference an existing version. |
+| **Artifact** | Yes | Where the model file lives — a **UC Volume** path or an **S3** path (read through its UC external volume — see section 6). For A/B tests you can add more than one, or reference an existing version. |
 | **Model contract** | Yes | How you describe inputs/outputs (see section 7): **Columnar schema** (tabular models) or **Sample input / output** (text / JSON / tensor models). |
 | **Input / Output schema** *(schema mode)* | — | JSON arrays of the model's columns (see section 7). |
 | **Sample input / output** *(sample mode)* | — | A real request/response example, e.g. `{"instances": [...]}` / `{"predictions": [...]}` (see section 7). |
-| **Experiment name** | No | MLflow experiment path to log to. **Leave blank** to use the environment's configured default. |
+| **Experiment name** | Yes | MLflow experiment path to log to. **Pre-filled** with the environment's configured experiment folder as `<folder>/<model name>`; edit only to override. |
 | **Evaluation dataset** | No | A CSV/Parquet path to score the model against (see section 9). Leave blank to skip. |
 | **UC Model name** | Yes | The Unity Catalog three-level name the model is registered under: **Catalog**, **Schema**, **Model**. |
-| **Serverless usage policy** | No | A budget/usage policy ID for endpoint cost tracking. **Leave blank** to use the environment's configured default. |
+| **Serverless usage policy** | Yes | A budget/usage policy ID for endpoint cost tracking. **Pre-filled** with the environment's configured policy; edit only to override. |
 | **Compute** | Yes | CPU or GPU, size (SMALL / MEDIUM / LARGE), and scale-to-zero on/off (see section 8). |
 | **Tags** | No | A JSON object of extra tags for the endpoint (see section 10). |
 | **Endpoint permissions** | No | JSON granting others access to the endpoint (see section 11). |
 
-> **Note on Experiment and Serverless usage policy:** both are optional. When you leave them blank,
-> the deployment uses the defaults your administrator configured for the environment. Fill them in
-> only to override for a single deployment.
+> **Note on Experiment and Serverless usage policy:** both are required, and both are pre-filled
+> with the defaults your administrator configured for the environment. Change them only to override
+> for a single deployment.
 
 # 6. Choosing an artifact
 
@@ -82,7 +82,11 @@ Each deployment has one or more **variants**. A variant is one of:
 - **New artifact** — a model file that gets wrapped and registered as a new version. Choose the
   source type and enter the path:
   - **UC Volume**: `/Volumes/<catalog>/<schema>/<volume>/path/to/model.pkl`
-  - **S3**: `s3://bucket/path/to/model.pkl`
+  - **S3**: `s3://bucket/path/to/model.pkl` — the S3 location must be registered in Unity Catalog
+    as an **external volume** you can read. The deploy job swaps the S3 path for the matching
+    `/Volumes/<catalog>/<schema>/<volume>/…` path and then reads it like any UC Volume artifact; the
+    deployment's timeline shows the resolution, and a new version is pre-filled with the volume
+    path. If no external volume covers the S3 path, the deployment fails with a clear message.
 - **Existing version** — an already-registered version of the same Unity Catalog model. It is
   served **as-is** (no re-wrapping). Used for champion-vs-challenger A/B tests (section 13).
 
@@ -283,7 +287,7 @@ Fix the underlying issue and deploy again. A failed deployment does **not** crea
   sample you paste.
 - Use **`double`** for continuous features and regression outputs; use **`long`** for class labels
   so the validator scores it as a classifier.
-- Leave **Experiment** and **Serverless usage policy** blank unless you specifically need to
+- Keep the pre-filled **Experiment** and **Serverless usage policy** unless you specifically need to
   override the environment defaults.
 - For A/B tests, remember the traffic must total **100%** before Save is enabled.
 - The first call to a **scale-to-zero** endpoint after it's been idle has a short cold-start delay;
