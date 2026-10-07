@@ -6,10 +6,19 @@ import { z } from 'zod';
 const PG_SCHEMA = process.env.PG_APP_SCHEMA || 'model_deployer';
 
 // ---- Deploy spec validation -------------------------------------------------
-// Artifact source types the deploy job can prepare (one handler each in the notebook's
-// ARTIFACT_SOURCE_HANDLERS). To add a new source, extend this list, add a form option, and
-// register its handler in the notebook.
+// Source types the deploy job can prepare, for model artifacts and the evaluation dataset alike
+// (one handler each in the notebook's ARTIFACT_SOURCE_HANDLERS). To add a new source, extend this
+// list, add a form option, and register its handler in the notebook.
 const ARTIFACT_TYPES = ['s3', 'uc_volume'] as const;
+// What a new artifact IS (one handler each in the job's FORMAT_HANDLERS): a single model file, a
+// folder holding an exported MLflow model (MLmodel), or a code folder (model.py + artifacts).
+const ARTIFACT_FORMATS = ['file', 'mlflow_model', 'code_folder'] as const;
+// How the model's signature is defined: columnar schema, sample input/output, or the MLflow model
+// folder's own signature ('model').
+const CONTRACT_MODES = ['schema', 'sample', 'model'] as const;
+// An S3 path is read through the UC external volume covering it (the deploy job resolves
+// s3://… to /Volumes/…), so it must be a real S3 URI.
+const S3_URI = /^s3[an]?:\/\//i;
 
 const fieldSchema = z.object({
   name: z.string().min(1),
@@ -24,6 +33,8 @@ const artifactSchema = z
     label: z.string().optional(),
     source: z.enum(['artifact', 'existing']).default('artifact'),
     type: z.enum(ARTIFACT_TYPES).optional(),
+    // Optional: blank -> the deploy job detects the format from what is at the path.
+    format: z.enum(ARTIFACT_FORMATS).optional(),
     path: z.string().optional(),
     version: z.union([z.number(), z.string()]).optional(),
     traffic_percent: z.number().min(0).max(100).optional(),
@@ -58,9 +69,7 @@ const artifactSchema = z
           message: 'artifact variant needs a path',
           path: ['path'],
         });
-      // An S3 artifact is read through the UC external volume covering it (the deploy job
-      // resolves s3://… to /Volumes/…), so it must be a real S3 URI.
-      else if (a.type === 's3' && !/^s3[an]?:\/\//i.test(a.path.trim()))
+      else if (a.type === 's3' && !S3_URI.test(a.path.trim()))
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           message: 'S3 artifact path must start with s3://',
@@ -82,10 +91,17 @@ const deploySpecSchema = z.object({
   // Raw JSON text; the deploy job unwraps the serving envelope and infers the signature from it.
   sample_input: z.string().optional().default(''),
   sample_output: z.string().optional().default(''),
+  // Explicit contract mode; blank -> 'sample' when a sample input + output is given, else 'schema'.
+  // 'model' uses the MLflow model folder's own signature (sample_input is then optional and only
+  // used to smoke-test the endpoint).
+  contract_mode: z.enum(CONTRACT_MODES).optional(),
   // Optional: when blank, the deploy job falls back to the bundle defaults (var.experiment /
   // var.budget_policy_id) configured for the environment.
   experiment_name: z.string().optional().default(''),
   eval_dataset: z.string().optional().default(''),
+  // Where the evaluation dataset lives (same source types as artifacts). Blank -> classified by
+  // the path's shape (s3:// = S3, else UC Volume).
+  eval_dataset_type: z.enum(ARTIFACT_TYPES).optional(),
   serverless_usage_policy: z.string().optional().default(''),
   tags: z.record(z.string(), z.any()).default({}),
   // Optional serving-endpoint access control, grouped by permission level. Each entry is a
@@ -112,11 +128,18 @@ const deploySpecSchema = z.object({
   }),
   endpoint_name: z.string().optional(),
 }).superRefine((s, ctx) => {
-  // UC requires a signature, so a contract must be defined one of two ways: an output schema, or a
-  // sample input + output. Reject a spec that supplies neither.
+  // UC requires a signature, so a contract must come from an output schema, a sample input +
+  // output, or (contract_mode 'model') the MLflow model folder itself.
   const hasSchema = s.output_schema.length > 0;
   const hasSample = s.sample_input.trim() !== '' && s.sample_output.trim() !== '';
-  if (!hasSchema && !hasSample) {
+  if (resolveContractMode(s) === 'model') {
+    if (s.artifacts.some((a) => a.source !== 'existing' && a.format !== 'mlflow_model'))
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "contract_mode 'model' needs every new variant to be an MLflow model folder",
+        path: ['contract_mode'],
+      });
+  } else if (!hasSchema && !hasSample) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       message:
@@ -124,7 +147,23 @@ const deploySpecSchema = z.object({
       path: ['output_schema'],
     });
   }
+  if (s.eval_dataset_type === 's3' && s.eval_dataset.trim() && !S3_URI.test(s.eval_dataset.trim())) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'S3 evaluation dataset path must start with s3://',
+      path: ['eval_dataset'],
+    });
+  }
 });
+
+function resolveContractMode(s: {
+  contract_mode?: (typeof CONTRACT_MODES)[number];
+  sample_input: string;
+  sample_output: string;
+}) {
+  if (s.contract_mode) return s.contract_mode;
+  return s.sample_input.trim() && s.sample_output.trim() ? 'sample' : 'schema';
+}
 
 createApp({
   plugins: [
@@ -137,6 +176,8 @@ createApp({
             deploy_spec: z.string(),
             deployment_id: z.string(),
             artifact_sources: z.string(),
+            artifact_formats: z.string(),
+            eval_dataset_source: z.string(),
           }),
         },
       },
@@ -418,11 +459,25 @@ createApp({
         ]
           .sort()
           .join(',');
+        // Declared formats of the new-artifact variants (e.g. "file,mlflow_model"); "" when none are
+        // declared (the job then detects them).
+        const artifactFormats = [
+          ...new Set(spec.artifacts.filter((a) => a.source !== 'existing' && a.format).map((a) => a.format)),
+        ]
+          .sort()
+          .join(',');
+        // Same for the evaluation dataset ("" when none is given).
+        const evalPath = spec.eval_dataset.trim();
+        const evalDatasetSource = evalPath
+          ? (spec.eval_dataset_type ?? (S3_URI.test(evalPath) ? 's3' : 'uc_volume'))
+          : '';
 
         const result = await appkit.jobs('default').runNow({
           deploy_spec: JSON.stringify(fullSpec),
           deployment_id: String(deploymentId),
           artifact_sources: artifactSources,
+          artifact_formats: artifactFormats,
+          eval_dataset_source: evalDatasetSource,
         });
         if (!result.ok) {
           res
@@ -440,10 +495,9 @@ createApp({
         try {
           const uc = spec.uc;
           const ucFull = `${uc.catalog}.${uc.schema}.${uc.model}`;
-          // 'sample' when a sample input+output defined the contract, else 'schema'. Store the raw
-          // sample JSON so it can be shown/prefilled on a new version (mirrors the job's writer).
-          const contractMode =
-            spec.sample_input.trim() && spec.sample_output.trim() ? 'sample' : 'schema';
+          // 'schema' / 'sample' / 'model' (see resolveContractMode). Store the raw sample JSON so it
+          // can be shown/prefilled on a new version (mirrors the job's writer).
+          const contractMode = resolveContractMode(spec);
           await pgQuery(
             `INSERT INTO ${PG_SCHEMA}.model_deployments
                (deployment_id, model_name, description, uc_catalog, uc_schema, uc_model,

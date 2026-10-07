@@ -6,7 +6,27 @@ import type { DeploymentRow, PendingDeployment } from '../types';
 
 // ---- shared types -----------------------------------------------------------
 type ArtifactType = 's3' | 'uc_volume';
+// An S3 path (artifact or evaluation dataset) is read through the UC external volume covering it,
+// so it must be a real S3 URI. Also used to classify an untyped path (s3:// = S3, else UC Volume).
+const S3_URI = /^s3[an]?:\/\//i;
+const sourceTypeOf = (path: string): ArtifactType => (S3_URI.test(path.trim()) ? 's3' : 'uc_volume');
 type VariantSource = 'artifact' | 'existing';
+// What a new artifact IS — the deploy job handles each differently (see its FORMAT_HANDLERS).
+type ArtifactFormat = 'file' | 'mlflow_model' | 'code_folder';
+const ARTIFACT_FORMAT_OPTIONS: { value: ArtifactFormat; label: string }[] = [
+  { value: 'file', label: 'Model file' },
+  { value: 'mlflow_model', label: 'MLflow model folder' },
+  { value: 'code_folder', label: 'Code folder' },
+];
+const FORMAT_HINTS: Record<ArtifactFormat, string> = {
+  file: 'A single pickle / joblib model file. Wrapped as an MLflow pyfunc using the contract below.',
+  mlflow_model:
+    'A folder holding an exported MLflow model (contains an MLmodel file) — e.g. exported from another workspace. Registered as-is with its own code, artifacts, signature and environment; validated in its own environment.',
+  code_folder:
+    'A folder with model.py (a PythonModel that calls mlflow.models.set_model(...)) plus its artifact files, and optionally requirements.txt. Every other file/folder is passed to load_context as context.artifacts["<name>"]. Keep heavy imports inside load_context / predict.',
+};
+// How the signature is defined; 'model' = the MLflow model folder's own signature.
+type ContractMode = 'schema' | 'sample' | 'model';
 type Size = 'SMALL' | 'MEDIUM' | 'LARGE';
 interface Artifact {
   label: string;
@@ -15,6 +35,8 @@ interface Artifact {
   // for a champion-vs-challenger A/B test).
   source: VariantSource;
   type: ArtifactType;
+  // Optional so drafts / rows saved before formats existed still load (treated as 'file').
+  format?: ArtifactFormat;
   path: string;
   version: string; // used when source === 'existing'
   traffic_percent: number;
@@ -25,13 +47,15 @@ export interface Prefill {
   name: string;
   description: string;
   artifacts: Artifact[];
-  contractMode?: 'schema' | 'sample';
+  contractMode?: ContractMode;
   inputSchemaText: string;
   outputSchemaText: string;
   sampleInputText?: string;
   sampleOutputText?: string;
   experimentName: string;
   evalDataset: string;
+  // Optional so drafts saved before this field existed still load (derived from the path then).
+  evalDatasetType?: ArtifactType;
   ucCatalog: string;
   ucSchema: string;
   ucModel: string;
@@ -140,6 +164,7 @@ function parsePrefill(row: DeploymentRow | null): Prefill | null {
       label?: string;
       source?: string;
       type?: string;
+      format?: string;
       path?: string;
       version?: number | string;
       traffic_percent?: number;
@@ -151,6 +176,7 @@ function parsePrefill(row: DeploymentRow | null): Prefill | null {
           label: a.label ?? String.fromCharCode(65 + i),
           source: a.source === 'existing' ? 'existing' : 'artifact',
           type: a.type === 's3' ? 's3' : 'uc_volume',
+          format: a.format === 'mlflow_model' || a.format === 'code_folder' ? a.format : 'file',
           path: a.path ?? '',
           version: a.version != null ? String(a.version) : '',
           traffic_percent: Number(a.traffic_percent ?? 0),
@@ -168,12 +194,18 @@ function parsePrefill(row: DeploymentRow | null): Prefill | null {
       row.output_schema_json || '[\n  { "name": "prediction", "type": "double" }\n]',
     // Restore a sample-defined contract so a new version prefills it and opens in sample mode.
     // Only set when the deployment actually used sample mode (else the form stays in schema mode).
+    contractMode: row.contract_mode === 'model' ? 'model' : undefined,
+    // In 'model' mode the sample input is optional and only used to smoke-test the endpoint.
     sampleInputText:
-      row.contract_mode === 'sample' && row.sample_input_json ? row.sample_input_json : undefined,
+      (row.contract_mode === 'sample' || row.contract_mode === 'model') && row.sample_input_json
+        ? row.sample_input_json
+        : undefined,
     sampleOutputText:
       row.contract_mode === 'sample' && row.sample_output_json ? row.sample_output_json : undefined,
     experimentName: row.experiment_name ?? '',
     evalDataset: row.eval_dataset ?? '',
+    // The job stores the resolved /Volumes path, so a new version prefills it as a UC Volume.
+    evalDatasetType: sourceTypeOf(row.eval_dataset ?? ''),
     ucCatalog: row.uc_catalog ?? '',
     ucSchema: row.uc_schema ?? '',
     ucModel: row.uc_model ?? '',
@@ -300,6 +332,17 @@ function Toggle({
   );
 }
 
+// Shown under an S3 path input (artifact or evaluation dataset).
+function S3VolumeNote() {
+  return (
+    <p className="mt-1 text-xs text-muted-foreground">
+      Read through the Unity Catalog external volume registered for this S3 location — the deploy job
+      resolves it to its <span className="font-mono">/Volumes/…</span> path, which the deployment then
+      shows. The S3 location must be covered by an external volume you can read.
+    </p>
+  );
+}
+
 // Dropdown of registered versions for a UC model (variant A of an A/B test). Sourced from
 // GET /api/model-versions (versions this app has successfully deployed for that model).
 function VersionPicker({
@@ -383,7 +426,7 @@ export function DeployModel({
   // Contract can be defined by a columnar SCHEMA (default) or by a real SAMPLE input/output
   // (preferred for text / JSON / tensor models like {"instances": [...]}). The deploy job infers
   // the MLflow signature from the sample, so it matches the model's native serving contract.
-  const [contractMode, setContractMode] = useState<'schema' | 'sample'>(
+  const [contractMode, setContractMode] = useState<ContractMode>(
     pf?.contractMode ?? (pf?.sampleInputText ? 'sample' : 'schema'),
   );
   // The draft this form is editing (if resumed or already saved once) — so Save updates it in place.
@@ -393,6 +436,9 @@ export function DeployModel({
   const [sampleOutputText, setSampleOutputText] = useState(pf?.sampleOutputText ?? '');
   const [experimentName, setExperimentName] = useState(pf?.experimentName ?? '');
   const [evalDataset, setEvalDataset] = useState(pf?.evalDataset ?? '');
+  const [evalDatasetType, setEvalDatasetType] = useState<ArtifactType>(
+    pf?.evalDatasetType ?? sourceTypeOf(pf?.evalDataset ?? '')
+  );
   const [ucCatalog, setUcCatalog] = useState(pf?.ucCatalog ?? '');
   const [ucSchema, setUcSchema] = useState(pf?.ucSchema ?? '');
   const [ucModel, setUcModel] = useState(pf?.ucModel ?? '');
@@ -476,15 +522,29 @@ export function DeployModel({
       return 'Every new-artifact variant needs a path.';
     if (
       artifacts.some(
-        (a) => a.source === 'artifact' && a.type === 's3' && !/^s3[an]?:\/\//i.test(a.path.trim()),
+        (a) => a.source === 'artifact' && a.type === 's3' && !S3_URI.test(a.path.trim()),
       )
     )
       return 'S3 artifact paths must start with s3://.';
+    if (evalDataset.trim() && evalDatasetType === 's3' && !S3_URI.test(evalDataset.trim()))
+      return 'S3 evaluation dataset path must start with s3://.';
     if (artifacts.some((a) => a.source === 'existing' && !/^\d+$/.test(a.version.trim())))
       return 'Every existing-model variant needs a version.';
     if (artifacts.length > 1 && trafficTotal !== 100)
       return `A/B traffic must total 100% (currently ${trafficTotal}%).`;
-    if (contractMode === 'sample') {
+    if (contractMode === 'model') {
+      // The MLflow model folder brings its own signature; the sample input (optional) only feeds
+      // the endpoint smoke test.
+      if (artifacts.some((a) => a.source === 'artifact' && (a.format ?? 'file') !== 'mlflow_model'))
+        return "\"Use the model's own signature\" needs every new variant to be an MLflow model folder.";
+      if (sampleInputText.trim()) {
+        try {
+          JSON.parse(sampleInputText);
+        } catch {
+          return 'Sample input must be valid JSON.';
+        }
+      }
+    } else if (contractMode === 'sample') {
       // Sample mode: both sample input and output must be valid, non-empty JSON. The deploy job
       // infers the UC signature from them, so no columnar schema is needed.
       for (const [label, txt] of [
@@ -563,6 +623,7 @@ export function DeployModel({
                 label: a.label,
                 source: 'artifact' as const,
                 type: a.type,
+                format: a.format ?? 'file',
                 path: a.path.trim(),
                 traffic_percent: Number(a.traffic_percent) || 0,
               },
@@ -573,9 +634,13 @@ export function DeployModel({
         // signature from these and serves the model's native format (e.g. {"instances": [...]}).
         ...(contractMode === 'sample'
           ? { sample_input: sampleInputText.trim(), sample_output: sampleOutputText.trim() }
-          : {}),
+          : contractMode === 'model' && sampleInputText.trim()
+            ? { sample_input: sampleInputText.trim() }
+            : {}),
+        contract_mode: contractMode,
         experiment_name: experimentName.trim(),
         eval_dataset: evalDataset.trim(),
+        ...(evalDataset.trim() ? { eval_dataset_type: evalDatasetType } : {}),
         serverless_usage_policy: usagePolicy.trim(),
         tags: JSON.parse(tagsText || '{}'),
         uc: {
@@ -624,7 +689,7 @@ export function DeployModel({
     return {
       name, description, artifacts, contractMode, inputSchemaText, outputSchemaText,
       sampleInputText, sampleOutputText, experimentName, evalDataset,
-      ucCatalog, ucSchema, ucModel, usagePolicy, tagsText, permissionsText,
+      evalDatasetType, ucCatalog, ucSchema, ucModel, usagePolicy, tagsText, permissionsText,
       computeType, gpuType, size, scaleToZero,
     };
   }
@@ -760,7 +825,7 @@ export function DeployModel({
                   </div>
                 ) : (
                   <>
-                    <div className="mb-2">
+                    <div className="mb-2 flex flex-wrap gap-2">
                       <Segmented<ArtifactType>
                         value={a.type}
                         onChange={(v) => setArtifact(i, { type: v })}
@@ -769,26 +834,23 @@ export function DeployModel({
                           { value: 'uc_volume', label: 'UC Volume' },
                         ]}
                       />
+                      <Segmented<ArtifactFormat>
+                        value={a.format ?? 'file'}
+                        onChange={(v) => setArtifact(i, { format: v })}
+                        options={ARTIFACT_FORMAT_OPTIONS}
+                      />
                     </div>
+                    <p className="mb-1 text-xs text-muted-foreground">{FORMAT_HINTS[a.format ?? 'file']}</p>
                     <input
                       className={inputCls}
                       placeholder={
-                        a.type === 's3'
-                          ? 's3://bucket/path/model.pkl'
-                          : '/Volumes/catalog/schema/volume/model.pkl'
+                        (a.type === 's3' ? 's3://bucket/path/' : '/Volumes/catalog/schema/volume/') +
+                        ((a.format ?? 'file') === 'file' ? 'model.pkl' : 'model_folder/')
                       }
                       value={a.path}
                       onChange={(e) => setArtifact(i, { path: e.target.value })}
                     />
-                    {a.type === 's3' && (
-                      <p className="mt-1 text-xs text-muted-foreground">
-                        Read through the Unity Catalog external volume registered for this S3
-                        location — the deploy job resolves it to its{' '}
-                        <span className="font-mono">/Volumes/…</span> path, which the deployment
-                        then shows. The S3 location must be covered by an external volume you can
-                        read.
-                      </p>
-                    )}
+                    {a.type === 's3' && <S3VolumeNote />}
                   </>
                 )}
                 {multi && (
@@ -839,14 +901,27 @@ export function DeployModel({
           <select
             className={inputCls}
             value={contractMode}
-            onChange={(e) => setContractMode(e.target.value as 'schema' | 'sample')}
+            onChange={(e) => setContractMode(e.target.value as ContractMode)}
           >
             <option value="schema">Columnar schema (tabular models)</option>
             <option value="sample">Sample input / output (text, JSON, tensor)</option>
+            <option value="model">Use the model's own signature (MLflow model folders)</option>
           </select>
         </Section>
 
-        {contractMode === 'schema' ? (
+        {contractMode === 'model' ? (
+          <Section
+            title="Sample input"
+            hint={`Optional — a real request for the model, e.g. {"inputs": ["Pregnancy Test"]}. Used to validate the model in its own environment and to smoke-test the endpoint (a failure rolls the endpoint back). Leave blank to use the model's saved input example, if it has one.`}
+          >
+            <textarea
+              className={`${inputCls} min-h-[96px] font-mono text-xs`}
+              placeholder={'{\n  "inputs": ["Pregnancy Test", "EKG"]\n}'}
+              value={sampleInputText}
+              onChange={(e) => setSampleInputText(e.target.value)}
+            />
+          </Section>
+        ) : contractMode === 'schema' ? (
           <>
             <Section
               title="Input Schema"
@@ -923,14 +998,29 @@ export function DeployModel({
 
         <Section
           title="Evaluation dataset location"
-          hint="Optional — leave blank to skip. If given, a UC Volume (or S3, resolved to its external volume) CSV or Parquet with the model's features plus a target column named like the output field; validated with mlflow.evaluate."
+          hint="Optional — leave blank to skip. If given, a CSV or Parquet file with the model's features plus a target column named like the output field; validated with mlflow.evaluate."
         >
+          <div className="mb-2">
+            <Segmented<ArtifactType>
+              value={evalDatasetType}
+              onChange={setEvalDatasetType}
+              options={[
+                { value: 's3', label: 'S3 Bucket' },
+                { value: 'uc_volume', label: 'UC Volume' },
+              ]}
+            />
+          </div>
           <input
             className={inputCls}
-            placeholder="s3://bucket/eval/dataset.parquet  or  /Volumes/catalog/schema/vol/eval.csv"
+            placeholder={
+              evalDatasetType === 's3'
+                ? 's3://bucket/eval/dataset.parquet'
+                : '/Volumes/catalog/schema/volume/eval.csv'
+            }
             value={evalDataset}
             onChange={(e) => setEvalDataset(e.target.value)}
           />
+          {evalDatasetType === 's3' && <S3VolumeNote />}
         </Section>
 
         <Section

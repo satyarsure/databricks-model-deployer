@@ -5,8 +5,10 @@ Catalog Volume** (or an **S3** path, read through the UC external volume registe
 publish it to **Databricks Model Serving** — reusing the MLflow
 deployment pattern from Genesis Workbench.
 
-A parameterized workflow job wraps the artifact as an MLflow **pyfunc**, registers it to **Unity
-Catalog**, validates it, and creates/updates a **serving endpoint** (A/B traffic split, CPU/GPU
+A parameterized multi-task workflow job turns the artifact into an MLflow **pyfunc** — a single
+**model file** (wrapped), an exported **MLflow model folder** (registered as-is, e.g. from another
+workspace), or a **code folder** (`model.py` + artifacts, MLflow models-from-code) — registers it to
+**Unity Catalog**, validates it (in the job, or in the model's own environment), and creates/updates a **serving endpoint** (A/B traffic split, CPU/GPU
 sizing, scale-to-zero, inference tables, and a serverless **budget policy** for chargeback).
 Deployment status and full **model lifecycle history** are tracked in **Lakebase Postgres** (for
 sub-second, real-time reads on the live status board), with the active version marked by a UC
@@ -27,16 +29,25 @@ React/AppKit app
  └─ Deploy Model tab     → POST /api/deploy → (1) writes an initial "submitted" record to Lakebase
                             so a real row shows instantly, then (2) triggers the deploy job.
                                                    │
-Deploy job (DABs, serverless) — one notebook, three stages:
-   Wrapper    → resolve any s3:// path to its UC external volume (/Volumes/…), load artifact(s),
-                wrap as MLflow pyfunc, build the SIGNATURE (from a columnar schema,
-                OR inferred from a sample input/output — see "Model contract" below), register each
-                new-artifact variant to UC (a variant may instead reference an existing version)
-   Validator  → load the registered pyfunc, smoke-test predict (non-fatal — surfaced on the timeline
-                but never blocks serving), optional mlflow.evaluate vs an eval dataset
-   Deployer   → create/update the serving endpoint (traffic split, compute, scale-to-zero, tags,
-                budget policy, inference tables, access permissions); set the UC @champion alias
-   (every stage writes status to Lakebase model_deployments and appends to model_lifecycle_events)
+Deploy job (DABs, serverless) — a DAG of thin task notebooks over a shared package
+(deploy-job/src/model_deployer/):
+   prepare            → record the deployment; resolve s3:// paths to their UC external volume;
+                        detect each artifact's FORMAT; check a signature will exist; publish the plan
+   register           → per-format handler → a UC model version (see "Artifact formats" below);
+                        an A/B variant may instead reference an existing version
+   has_file_variants / has_isolated_variants (condition tasks) route validation:
+     validate_in_job   → model files: smoke-test predict (non-fatal) + optional mlflow evaluate
+     validate_isolated → MLflow model / code folders: mlflow.models.predict in the model's OWN
+                         environment (env_manager="uv") — a failure stops the deployment
+   deploy_endpoint    → capture the current config (for rollback), then create/update the endpoint
+                        (traffic split, compute, scale-to-zero, tags, budget policy, inference
+                        tables, access permissions)
+   smoke_test         → call every served variant; with a real payload a failure ROLLS BACK the
+                        endpoint to its previous config and fails the deployment
+   finalize           → set the UC @champion alias, mark COMPLETE
+   on_failure         → (run_if AT_LEAST_ONE_FAILED) record FAILED + the failed task's error
+   (every task writes status to Lakebase model_deployments and appends to model_lifecycle_events;
+    a repair run re-runs only the failed task onwards)
 
 Lakebase Postgres (schema `model_deployer`) — the app's operational store:
    model_deployments      → one upserted row per deployment (keyed on deployment_id)
@@ -51,7 +62,7 @@ Lakebase Postgres (schema `model_deployer`) — the app's operational store:
 |------|-------------|
 | `app/` | The React/AppKit app (frontend + Express server). Reads Lakebase via Express routes (`server/server.ts`) — no `config/queries` / analytics warehouse. |
 | `app/client/src/lib/useApiQuery.ts` | Small client hook that fetches the app's JSON routes (replaces `useAnalyticsQuery`). |
-| `deploy-job/` | The DABs bundle for the deploy workflow job (`src/notebooks/deploy_model.py`). Writes status/lifecycle to Lakebase Postgres. |
+| `deploy-job/` | The DABs bundle for the multi-task deploy job (`resources/deploy_model.job.yml`): task notebooks in `src/notebooks/` (`01_prepare` … `07_finalize`, `99_on_failure`) over the shared package `src/model_deployer/`. Writes status/lifecycle to Lakebase Postgres. |
 | `deploy-job/requirements.txt` | Pinned dependency set for the job's serverless environment (includes `psycopg`). |
 | `governance/` | Optional DABs bundle that declaratively creates the **UC schema + `artifacts` volume** (where models are registered and artifacts live). The app's data lives in Lakebase, granted automatically by the job — see [INSTALL.md](INSTALL.md) §6f. |
 | `testing/` | Manual-testing fixtures (`setup_test_artifacts.py`) and guide (`README.md`). |
@@ -62,7 +73,7 @@ Lakebase Postgres (schema `model_deployer`) — the app's operational store:
 Package versions are pinned in two places so a serverless base-image change can't silently break
 a run or drift predictions:
 
-- **Deploy job** — the notebook does **no** `%pip install`. Instead the job declares a pinned
+- **Deploy job** — the task notebooks do **no** `%pip install`. Instead the job declares a pinned
   serverless environment (`resources/deploy_model.job.yml` → `environments[].spec`) with
   `environment_version` (pins the Python runtime) and `-r requirements.txt` (pins every package,
   including `psycopg` for the Postgres writes).
@@ -154,6 +165,29 @@ The **Experiment** and **Serverless usage policy** are also **required** Deploy-
 `model_deployer_config` table): Experiment as `<experiment>/<model name>`, the policy as
 `budget_policy_id`. Edit either to override for a single deployment.
 
+## Artifact formats
+
+Each new-artifact variant declares **what** it is (the form's format selector; the job also detects
+it from the path and fails on a mismatch). The app passes the declared formats as the
+`artifact_formats` job parameter.
+
+| Format | What is at the path | How the job registers it | Validation |
+|---|---|---|---|
+| **Model file** (`file`) | one `.pkl` / `.joblib` | MLflow models-from-code wrapper `model_deployer/file_model.py`: the file is logged as an artifact and loaded in `load_context` (never cloudpickled); signature from the form's contract | in the job |
+| **MLflow model folder** (`mlflow_model`) | an exported MLflow model — a folder with `MLmodel` (e.g. exported from **another workspace**) | registered **as-is**: its own `python_model`, artifacts, signature and environment are kept; the source workspace's `run_id` / logged-model id are reset; junk such as `.DS_Store` is dropped; `ipython` is added to its requirements when its `python_model.pkl` references IPython (a notebook-defined `PythonModel` captures IPython's `open`). If it has no signature, the form's contract supplies one | isolated (`mlflow.models.predict`, `env_manager="uv"`) |
+| **Code folder** (`code_folder`) | `model.py` (a `PythonModel` calling `mlflow.models.set_model(...)`) + its artifact files/dirs, optional `requirements.txt` (and `code/` for helper modules — each entry is shipped via `code_paths` and importable by name) | MLflow models-from-code: every other entry is passed as `context.artifacts["<name>"]`; signature from the form's contract. Keep heavy imports inside `load_context` / `predict` (the job imports `model.py` when logging) | isolated |
+
+**Contract mode "Use the model's own signature"** (`contract_mode: "model"`) is available when every
+new variant is an MLflow model folder: no schema/sample is needed, and an optional **sample input**
+is used to validate the model in its own environment and to smoke-test the endpoint (otherwise the
+model's saved input example is used).
+
+**Smoke test + rollback.** After the endpoint is updated, every served variant is called. With a
+real payload (the form's sample input, or the model's saved `serving_input_example.json`) a failure
+restores the endpoint's previous served entities + traffic and fails the deployment (a brand-new
+endpoint has nothing to restore and is left in place). With only a synthetic example built from the
+columnar schema, a failure is logged as a warning. `@champion` moves only after the smoke test passes.
+
 ## S3 artifacts (via UC external volumes)
 
 An S3 artifact is **not** downloaded with AWS credentials. Every S3 location is expected to be
@@ -162,20 +196,23 @@ it — exactly like a UC Volume artifact. At the start of the run the job looks 
 in `system.information_schema.volumes` (longest `storage_location` prefix wins), rewrites
 `s3://bucket/prefix/model.pkl` → `/Volumes/<catalog>/<schema>/<volume>/model.pkl`, records the
 resolution on the lifecycle timeline, and writes the volume path back to `model_deployments
-.artifacts_json` (keeping the original as `s3_path`), so a new version prefills the **volume** path.
-An S3 evaluation dataset is resolved the same way. `information_schema` only lists volumes the job's
+.artifacts_json` (keeping the original as `original_type` / `original_path`), so a new version
+prefills the **volume** path. The **evaluation dataset** works the same way: the form has its own
+**S3 Bucket / UC Volume** choice (`eval_dataset_type`), and an S3 dataset is resolved to its volume
+path, which is stored in `model_deployments.eval_dataset`. `information_schema` only lists volumes the job's
 run-as identity holds a privilege on, so that identity needs **`READ VOLUME`** on the external
 volume; if no volume covers the path, the deployment fails at the wrapper stage with a clear error.
 
-**Artifact-source flag.** Alongside `deploy_spec`, the app passes the job an `artifact_sources`
-parameter — the distinct source types of the deployment's new-artifact variants (e.g. `s3`,
-`uc_volume`, `s3,uc_volume`; blank when every variant is an existing version). The notebook runs only
-the handlers for those types (`ARTIFACT_SOURCE_HANDLERS`), so the S3 lookup is skipped for a
-UC-Volume-only deployment. If the parameter is blank (a manual run) it is derived from `deploy_spec`,
-and a type the spec uses is never skipped even if the flag omits it; an unknown type fails fast. To
-add a source type: extend `ARTIFACT_TYPES` in `app/server/server.ts`, add the form option in
-`DeployModel.tsx`, and register a handler in the notebook that turns the artifact into a `/Volumes`
-path.
+**Source flags.** Alongside `deploy_spec`, the app passes the job two parameters:
+`artifact_sources` — the distinct source types of the deployment's new-artifact variants (e.g. `s3`,
+`uc_volume`, `s3,uc_volume`; blank when every variant is an existing version) — and
+`eval_dataset_source` — the evaluation dataset's type (blank when there is none). The notebook runs
+only the handlers for those types (`ARTIFACT_SOURCE_HANDLERS`, shared by artifacts and the eval
+dataset), so the S3 lookup is skipped when nothing is on S3. If a flag is blank (a manual run) it is
+derived from `deploy_spec`; a type the spec uses is never skipped even if the flag omits it, an
+`s3://` eval path is always treated as S3, and an unknown type fails fast. To add a source type:
+extend `ARTIFACT_TYPES` in `app/server/server.ts`, add the form options in `DeployModel.tsx` (artifact
+and eval dataset), and register a handler in the notebook that turns a path into a `/Volumes` path.
 
 ## Deploy
 

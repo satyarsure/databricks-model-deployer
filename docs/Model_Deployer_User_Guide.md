@@ -64,7 +64,7 @@ becoming ready).
 | **Input / Output schema** *(schema mode)* | — | JSON arrays of the model's columns (see section 7). |
 | **Sample input / output** *(sample mode)* | — | A real request/response example, e.g. `{"instances": [...]}` / `{"predictions": [...]}` (see section 7). |
 | **Experiment name** | Yes | MLflow experiment path to log to. **Pre-filled** with the environment's configured experiment folder as `<folder>/<model name>`; edit only to override. |
-| **Evaluation dataset** | No | A CSV/Parquet path to score the model against (see section 9). Leave blank to skip. |
+| **Evaluation dataset** | No | A CSV/Parquet file to score the model against — **UC Volume** or **S3** (see section 9). Leave blank to skip. |
 | **UC Model name** | Yes | The Unity Catalog three-level name the model is registered under: **Catalog**, **Schema**, **Model**. |
 | **Serverless usage policy** | Yes | A budget/usage policy ID for endpoint cost tracking. **Pre-filled** with the environment's configured policy; edit only to override. |
 | **Compute** | Yes | CPU or GPU, size (SMALL / MEDIUM / LARGE), and scale-to-zero on/off (see section 8). |
@@ -79,9 +79,18 @@ becoming ready).
 
 Each deployment has one or more **variants**. A variant is one of:
 
-- **New artifact** — a model file that gets wrapped and registered as a new version. Choose the
-  source type and enter the path:
-  - **UC Volume**: `/Volumes/<catalog>/<schema>/<volume>/path/to/model.pkl`
+- **New artifact** — registered as a new version. Choose **where** it lives (the source type) and
+  **what** it is (the format), then enter the path:
+  - **Model file** — a single pickle / joblib file (e.g. scikit-learn, XGBoost, LightGBM), wrapped
+    using the contract you define (section 7).
+  - **MLflow model folder** — a folder holding an exported MLflow model (it contains an `MLmodel`
+    file), for example exported from another workspace. It is registered as-is, with its own code,
+    artifacts, signature and environment, and is tested in its own environment before serving.
+  - **Code folder** — a folder with a `model.py` (a `PythonModel` with `load_context` / `predict`
+    that ends with `mlflow.models.set_model(...)`), the artifact files it loads (each available as
+    `context.artifacts["<file name>"]`) and an optional `requirements.txt`. Use this when a model
+    is several files but nobody exported an MLflow model.
+  - **UC Volume**: `/Volumes/<catalog>/<schema>/<volume>/path/to/model.pkl` (or `…/model_folder/`)
   - **S3**: `s3://bucket/path/to/model.pkl` — the S3 location must be registered in Unity Catalog
     as an **external volume** you can read. The deploy job swaps the S3 path for the matching
     `/Volumes/<catalog>/<schema>/<volume>/…` path and then reads it like any UC Volume artifact; the
@@ -90,12 +99,16 @@ Each deployment has one or more **variants**. A variant is one of:
 - **Existing version** — an already-registered version of the same Unity Catalog model. It is
   served **as-is** (no re-wrapping). Used for champion-vs-challenger A/B tests (section 13).
 
-Supported artifact formats are standard pickled model files (e.g. scikit-learn, XGBoost, LightGBM).
+The format you pick is checked against what is actually at the path (a folder with `MLmodel` is an
+MLflow model folder, a folder with `model.py` is a code folder, a single file is a model file); a
+mismatch fails the deployment at the *prepare* step with a clear message.
 
 # 7. Defining the model contract (schema **or** sample)
 
-Every model must have a contract so it can be registered and served. Pick one of two modes with the
-**Model contract** selector on the form. (Unity Catalog requires a signature, so you can't deploy
+Every model must have a contract so it can be registered and served. Pick a mode with the
+**Model contract** selector on the form. When **every** new variant is an MLflow model folder you can
+also choose **Use the model's own signature**: no schema or sample is needed, and an optional
+*Sample input* is used to test the model in its own environment and to smoke-test the endpoint. (Unity Catalog requires a signature, so you can't deploy
 with no contract at all.)
 
 ## Mode A — Columnar schema (tabular models)
@@ -145,8 +158,16 @@ at query time.
 
 # 9. Evaluation dataset (optional)
 
-If you provide an **Evaluation dataset** (a CSV or Parquet path), the validator runs
-`mlflow.evaluate` against it. The file's columns must be the model's features **plus a target
+If you provide an **Evaluation dataset** (a CSV or Parquet file), the validator runs
+`mlflow.evaluate` against it. Like an artifact, choose where it lives:
+
+- **UC Volume**: `/Volumes/<catalog>/<schema>/<volume>/path/to/eval.csv`
+- **S3**: `s3://bucket/path/to/eval.parquet` — the S3 location must be covered by a Unity Catalog
+  **external volume** you can read. The deploy job swaps it for the matching `/Volumes/…` path
+  (shown on the deployment's timeline) and reads it from there; if no external volume covers it,
+  the deployment fails with a clear message.
+
+ The file's columns must be the model's features **plus a target
 column named exactly like your output-schema field** (e.g. `price`, `prediction`, `churn`).
 
 - If the output field is `long`/integer → **classifier** metrics are computed.

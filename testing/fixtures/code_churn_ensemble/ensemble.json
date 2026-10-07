@@ -1,0 +1,1 @@
+{"weights": {"churn_logreg.pkl": 0.4, "churn_rf.pkl": 0.6}, "threshold": 0.5}

@@ -5,9 +5,10 @@
 #
 # Keep this in sync with testing/setup_test_artifacts.py so fixture pickles are created
 # with the same scikit-learn/numpy/pandas the job (and serving container) will load them with.
-# Full mlflow (not mlflow-skinny): the validator uses mlflow.evaluate, which the skinny
-# client does not include — with skinny it raised and was silently skipped.
-mlflow[databricks]==2.16.2
+# Full mlflow (not mlflow-skinny): the validator uses mlflow evaluate, which the skinny client
+# does not include. MLflow 3.x matches the MLflow models users export (MLmodel folders) and provides
+# models-from-code (the FileModel wrapper) and mlflow.models.predict(env_manager="uv").
+mlflow[databricks]==3.16.1
 databricks-sdk==0.68.0
 # Postgres driver — the notebook writes deployment status + lifecycle to Lakebase (the app's
 # read store). Uses databricks-sdk's api_client for the OAuth DB credential (no SDK bump needed).
@@ -18,3 +19,5 @@ numpy==1.26.4
 scipy==1.13.1
 joblib==1.4.2
 cloudpickle==3.0.0
+# Builds a model's OWN environment for isolated validation (mlflow.models.predict env_manager="uv").
+uv==0.9.5

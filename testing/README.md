@@ -515,13 +515,69 @@ databricks serving-endpoints query protocol_text_clf_endpoint \
 On **Deployed Models**, the row records `contract_mode = sample`; clicking the model name to deploy a
 **new version** re-opens the form in **Sample** mode with the sample pre-filled.
 
+## TC12 — MLflow model folder (exported from another workspace) ⭐
+
+Deploy an exported MLflow pyfunc folder as-is — e.g. the ClinicalBERT + SVM procedure classifier in
+`…/test_artifacts/export_model/` (`MLmodel`, `python_model.pkl`, `artifacts/clinicalbert/…`,
+`artifacts/svm_model_linear_overSampling_all.pkl`, `artifacts/mapping_dictionary.json`).
+
+| field | value |
+|---|---|
+| Model Name | `invasive-procedure-clf` |
+| Artifact | UC Volume · **MLflow model folder** · `/Volumes/<catalog>/<schema>/<volume>/test_artifacts/export_model/` |
+| **Model contract** | **Use the model's own signature** |
+| Sample input | `{"inputs": ["Pregnancy Test", "EKG", "Biopsy"]}` |
+| UC Model name | `<catalog>` · `<schema>` · `invasive_procedure_clf` |
+| Compute | CPU · MEDIUM · Scale-to-zero ON |
+
+**Expected:** *prepare* detects `mlflow_model`; *register* logs the folder as-is (timeline notes
+"added ipython to requirements" — its `python_model.pkl` references IPython); *validate_isolated*
+builds the model's own environment (torch / transformers — the slowest step) and predicts on the
+sample; *deploy_endpoint* → *smoke_test* calls the endpoint with the sample → **Complete**.
+
+## TC13 — Code folder (model.py + artifacts) ⭐
+
+Upload `testing/fixtures/code_model/` (`model.py`, `requirements.txt`) plus `house_price_linreg.pkl`
+(from `setup_test_artifacts.py`) into one folder, e.g. `…/test_artifacts/code_model/`.
+
+| field | value |
+|---|---|
+| Model Name | `house-price-code` |
+| Artifact | UC Volume · **Code folder** · `/Volumes/<catalog>/<schema>/<volume>/test_artifacts/code_model/` |
+| **Model contract** | Columnar schema — input `sqft, bedrooms, bathrooms, age` (double), output `price` (double) |
+| UC Model name | `<catalog>` · `<schema>` · `house_price_code` |
+| Compute | CPU · SMALL · Scale-to-zero ON |
+
+**Expected:** registered with models-from-code (`house_price_linreg.pkl` passed as
+`context.artifacts["house_price_linreg.pkl"]`); validated in its own environment; endpoint serves
+`dataframe_records` like TC1.
+
+### TC13b — more code-folder shapes (`testing/fixtures/`)
+
+Upload each fixture folder plus the pickles listed (all produced by `setup_test_artifacts.py`, or the
+text pipeline from TC11) into `…/test_artifacts/<fixture>/`, then deploy as a **Code folder**:
+
+| Fixture | Add these files | Exercises | Contract |
+|---|---|---|---|
+| `code_text_clf/` | `protocol_text_clf.pkl` | two artifacts (model + `labels.json` mapping); text in / text out | **Sample** — `{"instances": ["Pregnancy Test", "EKG", "Biopsy"]}` → `{"predictions": ["Non-invasive procedure", …]}` |
+| `code_churn_ensemble/` | `models/churn_logreg.pkl`, `models/churn_rf.pkl` | a **folder artifact** (`context.artifacts["models"]` is a directory), a JSON config, and a helper module in `code/` (shipped via `code_paths`, imported inside `predict`) | Schema — `tenure, monthly_charges, total_charges` (double) → `churn` (long) |
+| `code_iris_proba/` | `iris_rf.pkl` | **multi-column output** (DataFrame); eval dataset scored in the model's own environment | Schema — 4 iris features (double) → `prediction` (long), `class_name` (string), `confidence` (double); eval `test_models/iris_eval.csv` |
+| `code_no_model_py/` | any pickle | **negative**: a folder with no `model.py` / `MLmodel` | any — fails at *prepare*: "…is a folder but has neither an MLmodel file … nor a model.py" |
+
+## TC14 — Smoke-test failure rolls the endpoint back ⭐
+
+Deploy a **new version** of an already-deployed model with a **Sample** contract whose sample input
+the model can't accept (e.g. `{"instances": ["not", "numbers"]}` for the house-price regressor).
+**Expected:** *smoke_test* fails → timeline shows **rollback: restored the previous endpoint config**
+→ status **Failed**; the endpoint still serves the previous version and `@champion` doesn't move.
+
 ## What to check in the UI (every case)
 
 - **Deployed Models** row appears **immediately** as *Deploy in progress* with a real "submitted"
   lifecycle event (the app server writes the initial record to Lakebase on submit — no cold-start
   gap). The row **auto-expands once** but stays collapsible via the chevron.
 - The **lifecycle timeline** streams live (amber "live" dot), advancing through
-  **wrapper → validator → deployer**, each with a status + timestamp; **Deploy Date** shows the full
+  **prepare → wrapper → validator → deployer → smoke_test**, each with a status + timestamp; **Deploy Date** shows the full
   date + time.
 - On success the **Status** badge turns green **Complete** and the **Serving → Open** link works.
 - On failure (TC5/TC6) the badge turns red **Failed**, the error shows under the badge, and the

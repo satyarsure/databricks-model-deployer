@@ -1,49 +1,137 @@
+# Parameters every task receives (the app's run-now notebook_params — deploy_spec, deployment_id and
+# the *_sources / artifact_formats flags — override these for every notebook task in the run).
+x-deploy-params: &deploy_params
+  deploy_spec: "{}"
+  deployment_id: "-1"
+  # Distinct artifact source types (e.g. "s3,uc_volume") / formats (e.g. "file,mlflow_model") and the
+  # eval dataset's source type; sent by the app per run. Blank -> the job derives them from deploy_spec.
+  artifact_sources: ""
+  artifact_formats: ""
+  eval_dataset_source: ""
+  catalog: ${var.catalog}
+  schema: ${var.schema}
+  # Default MLflow experiment (the form can override per deployment).
+  experiment: ${var.experiment}
+  # Default serverless usage policy for the serving endpoints this job creates — same policy as the
+  # job itself. (The endpoints' tags are read from the job's own tags at runtime.)
+  serverless_policy: ${var.budget_policy_id}
+  # Lakebase Postgres coordinates for the app-facing status/lifecycle store.
+  pg_host: ${var.pg_host}
+  pg_database: ${var.pg_database}
+  pg_endpoint: projects/${var.lakebase_project}/branches/${var.lakebase_branch_name}/endpoints/${var.lakebase_endpoint_name}
+  pg_schema: ${var.pg_schema}
+  app_sp: ${var.app_sp}
+  # This run's id (dynamic value reference), recorded as run_id and used by on_failure.
+  job_run_id: "{{job.run_id}}"
+
 resources:
   jobs:
     deploy_model_job:
       name: mlops_deploy_model_job
       max_concurrent_runs: 5
 
-      # Serverless usage policy + the full governance/chargeback tag map. The notebook reads these
-      # same job tags at runtime (via the SDK) and applies them to every serving endpoint it creates,
-      # so the tag set is defined in exactly one place (var.resource_tags).
+      # Serverless usage policy + the full governance/chargeback tag map. The job reads these same
+      # tags at runtime (via the SDK) and applies them to every serving endpoint it creates, so the
+      # tag set is defined in exactly one place (var.resource_tags).
       budget_policy_id: ${var.budget_policy_id}
       tags: ${var.resource_tags}
 
+      # prepare -> register -> [validate_in_job | validate_isolated] -> deploy_endpoint -> smoke_test
+      # -> finalize, plus on_failure (records FAILED in Lakebase when any task fails). The condition
+      # tasks route validation by format: model files load in this job's environment; MLflow model
+      # folders / code folders are validated in their own environment. A repair run re-runs only the
+      # failed task and what follows it.
+      #
+      # Retries: serverless auto-retries a failed task, and a bundle can't switch that off
+      # (`max_retries: 0` is dropped as a zero value). So every task is retry-safe instead:
+      # deploy_endpoint never records a config this run already applied as the "previous" one, and
+      # smoke_test refuses to run against an endpoint that no longer serves this run's versions
+      # (e.g. after its own rollback); register may leave an extra, unserved version.
       tasks:
-        - task_key: deploy_model
-          # Pinned serverless environment (below) — locks Python + all package versions
-          # so a serverless base-image change can't break the run.
+        - task_key: prepare
           environment_key: locked
           notebook_task:
-            notebook_path: ../src/notebooks/deploy_model.py
-            base_parameters:
-              deploy_spec: "{}"
-              deployment_id: "-1"
-              # Distinct artifact source types (e.g. "s3,uc_volume"); sent by the app per run.
-              # Blank -> the notebook derives it from deploy_spec.
-              artifact_sources: ""
-              catalog: ${var.catalog}
-              schema: ${var.schema}
-              # Default MLflow experiment (the form can override per deployment).
-              experiment: ${var.experiment}
-              # Default serverless usage policy for the serving endpoints this job creates — same
-              # policy as the job itself, so all spend rolls up together. (The endpoints' tags are
-              # read from the job's own tags at runtime, so they aren't passed here.)
-              serverless_policy: ${var.budget_policy_id}
-              # Lakebase Postgres coordinates for the app-facing status/lifecycle store. The
-              # endpoint path is composed from the project name so it's set in one place.
-              pg_host: ${var.pg_host}
-              pg_database: ${var.pg_database}
-              pg_endpoint: projects/${var.lakebase_project}/branches/${var.lakebase_branch_name}/endpoints/${var.lakebase_endpoint_name}
-              pg_schema: ${var.pg_schema}
-              app_sp: ${var.app_sp}
-              # This run's id (dynamic value reference), recorded as run_id on the status row.
-              job_run_id: "{{job.run_id}}"
+            notebook_path: ../src/notebooks/01_prepare.py
+            base_parameters: *deploy_params
 
-      # Reproducible dependency set for serverless compute. environment_version pins the
-      # Python runtime; dependencies install the exact versions from the bundled
-      # requirements.txt (synced to ${workspace.file_path} at deploy time).
+        - task_key: register
+          depends_on: [{task_key: prepare}]
+          environment_key: locked
+          notebook_task:
+            notebook_path: ../src/notebooks/02_register.py
+            base_parameters: *deploy_params
+
+        - task_key: has_file_variants
+          depends_on: [{task_key: register}]
+          condition_task:
+            op: EQUAL_TO
+            left: "{{tasks.prepare.values.has_file}}"
+            right: "true"
+
+        - task_key: validate_in_job
+          depends_on: [{task_key: has_file_variants, outcome: "true"}]
+          environment_key: locked
+          notebook_task:
+            notebook_path: ../src/notebooks/03_validate_in_job.py
+            base_parameters: *deploy_params
+
+        - task_key: has_isolated_variants
+          depends_on: [{task_key: register}]
+          condition_task:
+            op: EQUAL_TO
+            left: "{{tasks.prepare.values.has_isolated}}"
+            right: "true"
+
+        - task_key: validate_isolated
+          depends_on: [{task_key: has_isolated_variants, outcome: "true"}]
+          environment_key: locked
+          # Builds the model's own environment (e.g. torch/transformers) — allow time for it.
+          timeout_seconds: 5400
+          notebook_task:
+            notebook_path: ../src/notebooks/04_validate_isolated.py
+            base_parameters: *deploy_params
+
+        - task_key: deploy_endpoint
+          # Skipped validation tasks (condition false) don't block; a failed one does.
+          depends_on: [{task_key: validate_in_job}, {task_key: validate_isolated}]
+          run_if: NONE_FAILED
+          environment_key: locked
+          notebook_task:
+            notebook_path: ../src/notebooks/05_deploy_endpoint.py
+            base_parameters: *deploy_params
+
+        - task_key: smoke_test
+          depends_on: [{task_key: deploy_endpoint}]
+          environment_key: locked
+          notebook_task:
+            notebook_path: ../src/notebooks/06_smoke_test.py
+            base_parameters: *deploy_params
+
+        - task_key: finalize
+          depends_on: [{task_key: smoke_test}]
+          environment_key: locked
+          notebook_task:
+            notebook_path: ../src/notebooks/07_finalize.py
+            base_parameters: *deploy_params
+
+        - task_key: on_failure
+          depends_on:
+            - {task_key: prepare}
+            - {task_key: register}
+            - {task_key: validate_in_job}
+            - {task_key: validate_isolated}
+            - {task_key: deploy_endpoint}
+            - {task_key: smoke_test}
+            - {task_key: finalize}
+          run_if: AT_LEAST_ONE_FAILED
+          environment_key: locked
+          notebook_task:
+            notebook_path: ../src/notebooks/99_on_failure.py
+            base_parameters: *deploy_params
+
+      # Reproducible dependency set for serverless compute. environment_version pins the Python
+      # runtime; dependencies install the exact versions from the bundled requirements.txt
+      # (synced to ${workspace.file_path} at deploy time).
       environments:
         - environment_key: locked
           spec:

@@ -277,9 +277,15 @@ cd ..
 ```
 
 > The job's serverless environment is pinned (`resources/deploy_model.job.yml` → `environment_version`
-> + `requirements.txt`, which includes `psycopg`). If the client's serverless doesn't support that
-> environment version, bump it there and redeploy. Don't add `%pip install` to the notebook — change
-> `deploy-job/requirements.txt`.
+> + `requirements.txt`, which includes MLflow 3.x, `psycopg` and `uv`). If the client's serverless
+> doesn't support that environment version, bump it there and redeploy. Don't add `%pip install` to
+> the task notebooks — change `deploy-job/requirements.txt`.
+>
+> **Isolated validation needs package downloads.** For MLflow model folders and code folders, the
+> `validate_isolated` task builds the model's own environment with `uv` from its requirements (e.g.
+> torch / transformers), so serverless compute must be able to reach PyPI (or the client's PyPI
+> mirror) and, when the model's Python version differs, download that Python build. Large models
+> can take tens of minutes the first time (the task's timeout is 90 minutes).
 
 ---
 
