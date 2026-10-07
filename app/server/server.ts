@@ -6,12 +6,12 @@ import { z } from 'zod';
 const PG_SCHEMA = process.env.PG_APP_SCHEMA || 'model_deployer';
 
 // ---- Deploy spec validation -------------------------------------------------
-// Source types the deploy job can prepare, for model artifacts and the evaluation dataset alike
-// (one handler each in the notebook's ARTIFACT_SOURCE_HANDLERS). To add a new source, extend this
-// list, add a form option, and register its handler in the notebook.
+// Where an artifact (or the evaluation dataset) lives. To add one, extend this list, add the form
+// option (DeployModel.tsx), and add an `elif` in resolve_path() (deploy-job .../artifacts.py).
 const ARTIFACT_TYPES = ['s3', 'uc_volume'] as const;
-// What a new artifact IS (one handler each in the job's FORMAT_HANDLERS): a single model file, a
-// folder holding an exported MLflow model (MLmodel), or a code folder (model.py + artifacts).
+// What a new artifact IS: a single model file, a folder holding an exported MLflow model
+// (MLmodel), or a code folder (model.py + artifacts). The deploy job also detects it from the path.
+// To add one, extend this list + the form option, and detect_format() / register_variant().
 const ARTIFACT_FORMATS = ['file', 'mlflow_model', 'code_folder'] as const;
 // How the model's signature is defined: columnar schema, sample input/output, or the MLflow model
 // folder's own signature ('model').
@@ -93,7 +93,7 @@ const deploySpecSchema = z.object({
   sample_output: z.string().optional().default(''),
   // Explicit contract mode; blank -> 'sample' when a sample input + output is given, else 'schema'.
   // 'model' uses the MLflow model folder's own signature (sample_input is then optional and only
-  // used to smoke-test the endpoint).
+  // used to test the model and the endpoint).
   contract_mode: z.enum(CONTRACT_MODES).optional(),
   // Optional: when blank, the deploy job falls back to the bundle defaults (var.experiment /
   // var.budget_policy_id) configured for the environment.
@@ -175,9 +175,6 @@ createApp({
           params: z.object({
             deploy_spec: z.string(),
             deployment_id: z.string(),
-            artifact_sources: z.string(),
-            artifact_formats: z.string(),
-            eval_dataset_source: z.string(),
           }),
         },
       },
@@ -452,32 +449,9 @@ createApp({
         const deploymentId = Date.now();
         const fullSpec = { ...spec, deployed_by: email };
 
-        // Distinct source types of the NEW-artifact variants (e.g. "s3,uc_volume"; "" when every
-        // variant is an existing version), so the job runs only the source-specific steps needed.
-        const artifactSources = [
-          ...new Set(spec.artifacts.filter((a) => a.source !== 'existing' && a.type).map((a) => a.type)),
-        ]
-          .sort()
-          .join(',');
-        // Declared formats of the new-artifact variants (e.g. "file,mlflow_model"); "" when none are
-        // declared (the job then detects them).
-        const artifactFormats = [
-          ...new Set(spec.artifacts.filter((a) => a.source !== 'existing' && a.format).map((a) => a.format)),
-        ]
-          .sort()
-          .join(',');
-        // Same for the evaluation dataset ("" when none is given).
-        const evalPath = spec.eval_dataset.trim();
-        const evalDatasetSource = evalPath
-          ? (spec.eval_dataset_type ?? (S3_URI.test(evalPath) ? 's3' : 'uc_volume'))
-          : '';
-
         const result = await appkit.jobs('default').runNow({
           deploy_spec: JSON.stringify(fullSpec),
           deployment_id: String(deploymentId),
-          artifact_sources: artifactSources,
-          artifact_formats: artifactFormats,
-          eval_dataset_source: evalDatasetSource,
         });
         if (!result.ok) {
           res

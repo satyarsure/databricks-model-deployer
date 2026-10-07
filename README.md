@@ -29,25 +29,18 @@ React/AppKit app
  └─ Deploy Model tab     → POST /api/deploy → (1) writes an initial "submitted" record to Lakebase
                             so a real row shows instantly, then (2) triggers the deploy job.
                                                    │
-Deploy job (DABs, serverless) — a DAG of thin task notebooks over a shared package
-(deploy-job/src/model_deployer/):
-   prepare            → record the deployment; resolve s3:// paths to their UC external volume;
-                        detect each artifact's FORMAT; check a signature will exist; publish the plan
-   register           → per-format handler → a UC model version (see "Artifact formats" below);
-                        an A/B variant may instead reference an existing version
-   has_file_variants / has_isolated_variants (condition tasks) route validation:
-     validate_in_job   → model files: smoke-test predict (non-fatal) + optional mlflow evaluate
-     validate_isolated → MLflow model / code folders: mlflow.models.predict in the model's OWN
-                         environment (env_manager="uv") — a failure stops the deployment
-   deploy_endpoint    → capture the current config (for rollback), then create/update the endpoint
-                        (traffic split, compute, scale-to-zero, tags, budget policy, inference
-                        tables, access permissions)
-   smoke_test         → call every served variant; with a real payload a failure ROLLS BACK the
-                        endpoint to its previous config and fails the deployment
-   finalize           → set the UC @champion alias, mark COMPLETE
-   on_failure         → (run_if AT_LEAST_ONE_FAILED) record FAILED + the failed task's error
-   (every task writes status to Lakebase model_deployments and appends to model_lifecycle_events;
-    a repair run re-runs only the failed task onwards)
+Deploy job (DABs, serverless) — four steps in a straight line (deploy-job/README.md):
+   prepare   → record the deployment; resolve s3:// paths to their UC external volume; detect each
+               artifact's FORMAT and check it matches the form; check a signature will exist
+   register  → each new variant → a UC model version, by format (see "Artifact formats" below);
+               an A/B variant may instead reference an existing version
+   validate  → every new variant predicts in its OWN environment (`mlflow models predict
+               --env-manager uv`); optional evaluation dataset scored there too
+   deploy    → remember the endpoint's config → create/update it (traffic split, compute,
+               scale-to-zero, tags, budget policy, inference tables, permissions) → call every
+               served variant → on a real failure ROLL BACK and fail; else set @champion + COMPLETE
+   on_failure→ (only if a step failed) record FAILED + the failed step's error
+   (every step writes status to Lakebase model_deployments and appends to model_lifecycle_events)
 
 Lakebase Postgres (schema `model_deployer`) — the app's operational store:
    model_deployments      → one upserted row per deployment (keyed on deployment_id)
@@ -62,7 +55,7 @@ Lakebase Postgres (schema `model_deployer`) — the app's operational store:
 |------|-------------|
 | `app/` | The React/AppKit app (frontend + Express server). Reads Lakebase via Express routes (`server/server.ts`) — no `config/queries` / analytics warehouse. |
 | `app/client/src/lib/useApiQuery.ts` | Small client hook that fetches the app's JSON routes (replaces `useAnalyticsQuery`). |
-| `deploy-job/` | The DABs bundle for the multi-task deploy job (`resources/deploy_model.job.yml`): task notebooks in `src/notebooks/` (`01_prepare` … `07_finalize`, `99_on_failure`) over the shared package `src/model_deployer/`. Writes status/lifecycle to Lakebase Postgres. |
+| `deploy-job/` | The DABs bundle for the deploy job (`resources/deploy_model.job.yml`): four step notebooks in `src/notebooks/` (`1_prepare` → `2_register` → `3_validate` → `4_deploy`, plus `9_on_failure`) over the shared package `src/model_deployer/`, with unit tests in `tests/`. **Maintainer guide: [deploy-job/README.md](deploy-job/README.md).** |
 | `deploy-job/requirements.txt` | Pinned dependency set for the job's serverless environment (includes `psycopg`). |
 | `governance/` | Optional DABs bundle that declaratively creates the **UC schema + `artifacts` volume** (where models are registered and artifacts live). The app's data lives in Lakebase, granted automatically by the job — see [INSTALL.md](INSTALL.md) §6f. |
 | `testing/` | Manual-testing fixtures (`setup_test_artifacts.py`) and guide (`README.md`). |
@@ -123,7 +116,7 @@ so each deployment defines its contract one of two ways — chosen on the Deploy
   → `{"predictions": ["non-invasive", ...]}`). The job unwraps the serving envelope and infers the
   signature with `mlflow.infer_signature`; a list/array sample yields a **tensor** signature, which
   serves the native **`{"instances": [...]}`** contract. Best for text / NLP / JSON / tensor models,
-  and the smoke test runs on the **real** sample instead of a synthetic dummy.
+  and the model is tested (in its own environment and on the live endpoint) with the **real** sample.
 
 The chosen mode and the raw sample are stored on `model_deployments` (`contract_mode`,
 `sample_input_json`, `sample_output_json`) so a **new version prefills** the sample. Text models are
@@ -167,26 +160,30 @@ The **Experiment** and **Serverless usage policy** are also **required** Deploy-
 
 ## Artifact formats
 
-Each new-artifact variant declares **what** it is (the form's format selector; the job also detects
-it from the path and fails on a mismatch). The app passes the declared formats as the
-`artifact_formats` job parameter.
+Each new-artifact variant declares **what** it is (the form's format selector, stored in
+`deploy_spec`); the job's *prepare* step also detects it from the path and fails on a mismatch.
 
-| Format | What is at the path | How the job registers it | Validation |
-|---|---|---|---|
-| **Model file** (`file`) | one `.pkl` / `.joblib` | MLflow models-from-code wrapper `model_deployer/file_model.py`: the file is logged as an artifact and loaded in `load_context` (never cloudpickled); signature from the form's contract | in the job |
-| **MLflow model folder** (`mlflow_model`) | an exported MLflow model — a folder with `MLmodel` (e.g. exported from **another workspace**) | registered **as-is**: its own `python_model`, artifacts, signature and environment are kept; the source workspace's `run_id` / logged-model id are reset; junk such as `.DS_Store` is dropped; `ipython` is added to its requirements when its `python_model.pkl` references IPython (a notebook-defined `PythonModel` captures IPython's `open`). If it has no signature, the form's contract supplies one | isolated (`mlflow.models.predict`, `env_manager="uv"`) |
-| **Code folder** (`code_folder`) | `model.py` (a `PythonModel` calling `mlflow.models.set_model(...)`) + its artifact files/dirs, optional `requirements.txt` (and `code/` for helper modules — each entry is shipped via `code_paths` and importable by name) | MLflow models-from-code: every other entry is passed as `context.artifacts["<name>"]`; signature from the form's contract. Keep heavy imports inside `load_context` / `predict` (the job imports `model.py` when logging) | isolated |
+| Format | What is at the path | How the job registers it |
+|---|---|---|
+| **Model file** (`file`) | one `.pkl` / `.joblib` | MLflow models-from-code wrapper `model_deployer/file_model.py`: the file is logged as an artifact and loaded in `load_context` (never cloudpickled); signature from the form's contract |
+| **MLflow model folder** (`mlflow_model`) | an exported MLflow model — a folder with `MLmodel` (e.g. exported from **another workspace**) | registered **as-is**: its own `python_model`, artifacts, signature and environment are kept; the source workspace's `run_id` / logged-model id are reset; junk such as `.DS_Store` is dropped; `ipython` is added to its requirements when its `python_model.pkl` references IPython (a notebook-defined `PythonModel` captures IPython's `open`). If it has no signature, the form's contract supplies one |
+| **Code folder** (`code_folder`) | `model.py` (a `PythonModel` calling `mlflow.models.set_model(...)`) + its artifact files/dirs, optional `requirements.txt` (and `code/` for helper modules — each entry is shipped via `code_paths` and importable by name) | MLflow models-from-code: every other entry is passed as `context.artifacts["<name>"]`; signature from the form's contract. Keep heavy imports inside `load_context` / `predict` (the job imports `model.py` when logging) |
 
 **Contract mode "Use the model's own signature"** (`contract_mode: "model"`) is available when every
 new variant is an MLflow model folder: no schema/sample is needed, and an optional **sample input**
-is used to validate the model in its own environment and to smoke-test the endpoint (otherwise the
+is used to validate the model in its own environment and to test the endpoint (otherwise the
 model's saved input example is used).
 
-**Smoke test + rollback.** After the endpoint is updated, every served variant is called. With a
-real payload (the form's sample input, or the model's saved `serving_input_example.json`) a failure
-restores the endpoint's previous served entities + traffic and fails the deployment (a brand-new
-endpoint has nothing to restore and is left in place). With only a synthetic example built from the
-columnar schema, a failure is logged as a warning. `@champion` moves only after the smoke test passes.
+**Validation — the same for every format.** The *validate* step runs every new variant in its own
+environment, built by `mlflow models predict --env-manager uv` from the model's requirements (model
+files use the job's pinned versions). A **real** input — the form's sample, or an MLflow model
+folder's own saved example — must predict, or the deployment fails before anything is served. A
+**synthetic** one-row input built from the columnar schema only produces a warning.
+
+**Endpoint test + rollback.** After the endpoint is updated, the *deploy* step calls every served
+variant. A real request that fails restores the endpoint's previous served entities + traffic and
+fails the deployment (a brand-new endpoint has nothing to restore and is left in place); a synthetic
+schema request that fails is a warning. `@champion` moves only after the endpoint test passes.
 
 ## S3 artifacts (via UC external volumes)
 
@@ -201,18 +198,11 @@ prefills the **volume** path. The **evaluation dataset** works the same way: the
 **S3 Bucket / UC Volume** choice (`eval_dataset_type`), and an S3 dataset is resolved to its volume
 path, which is stored in `model_deployments.eval_dataset`. `information_schema` only lists volumes the job's
 run-as identity holds a privilege on, so that identity needs **`READ VOLUME`** on the external
-volume; if no volume covers the path, the deployment fails at the wrapper stage with a clear error.
+volume; if no volume covers the path, the deployment fails at the *prepare* step with a clear error.
 
-**Source flags.** Alongside `deploy_spec`, the app passes the job two parameters:
-`artifact_sources` — the distinct source types of the deployment's new-artifact variants (e.g. `s3`,
-`uc_volume`, `s3,uc_volume`; blank when every variant is an existing version) — and
-`eval_dataset_source` — the evaluation dataset's type (blank when there is none). The notebook runs
-only the handlers for those types (`ARTIFACT_SOURCE_HANDLERS`, shared by artifacts and the eval
-dataset), so the S3 lookup is skipped when nothing is on S3. If a flag is blank (a manual run) it is
-derived from `deploy_spec`; a type the spec uses is never skipped even if the flag omits it, an
-`s3://` eval path is always treated as S3, and an unknown type fails fast. To add a source type:
-extend `ARTIFACT_TYPES` in `app/server/server.ts`, add the form options in `DeployModel.tsx` (artifact
-and eval dataset), and register a handler in the notebook that turns a path into a `/Volumes` path.
+**Adding a location or format** is a small `if/elif` change in
+`deploy-job/src/model_deployer/artifacts.py` plus the form option — see
+[deploy-job/README.md](deploy-job/README.md) → *Common changes*.
 
 ## Deploy
 

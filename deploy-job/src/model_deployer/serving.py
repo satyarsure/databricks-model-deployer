@@ -1,9 +1,20 @@
 """Serving endpoint: create/update (A/B traffic, compute, scale-to-zero, tags, budget policy),
-AI Gateway, access permissions, and the post-deploy smoke test with rollback."""
+AI Gateway, access permissions, the endpoint test with rollback, and @champion promotion.
+
+Used by the deploy step (notebooks/4_deploy), in this order:
+  capture_config -> deploy -> test_payload + query_served_model per variant -> rollback (on a real
+  failure) or promote."""
 import inspect
+import json
 import re
 import time
 from datetime import timedelta
+
+import mlflow
+from mlflow.models import convert_input_example_to_serving_input
+from mlflow.tracking import MlflowClient
+
+from model_deployer import artifacts
 
 from databricks.sdk import errors
 from databricks.sdk.service.serving import (
@@ -260,5 +271,33 @@ def query_served_model(ctx, served_model, payload, wait_minutes=15):
         except Exception as e:
             if not _TRANSIENT.search(str(e)) or time.time() > deadline:
                 raise
-            print(f"[smoke_test] {served_model}: transient error, retrying in 30s: {str(e)[:160]}")
+            print(f"[endpoint test] {served_model}: transient error, retrying in 30s: {str(e)[:160]}")
             time.sleep(30)
+
+
+def test_payload(ctx, variant):
+    """(request body, is_real) to test one served variant with. REAL = the form's sample input, or
+    an MLflow model folder's own saved serving example (written by the model's author). Otherwise a
+    SYNTHETIC one-row request built from the columnar schema — for a model file or code folder, the
+    example saved with the model is that same synthetic row, so it is not treated as real."""
+    req = artifacts.sample_request(ctx.spec)
+    if req is not None:
+        return req, True
+    if variant.get("format") == "mlflow_model":
+        try:
+            p = mlflow.artifacts.download_artifacts(
+                f"models:/{ctx.uc_full}/{variant['version']}/serving_input_example.json")
+            return json.load(open(p)), True
+        except Exception:
+            pass
+    ex = artifacts.schema_example(ctx.spec)
+    if ex is None:
+        return None, False
+    return json.loads(convert_input_example_to_serving_input(ex)), False
+
+
+def promote(ctx, variant_versions):
+    """Mark the active (highest-traffic) version @champion in Unity Catalog."""
+    primary = max(variant_versions, key=lambda v: int(v.get("traffic_percent", 0)))
+    MlflowClient().set_registered_model_alias(ctx.uc_full, "champion", int(primary["version"]))
+    return primary["version"]

@@ -14,7 +14,7 @@ import psycopg
 from databricks.sdk import WorkspaceClient
 
 # Every task gets the same widgets. The bundle supplies the defaults (base_parameters); the app's
-# run-now notebook_params (deploy_spec, deployment_id, *_sources/formats) apply to every notebook task.
+# run-now notebook_params (deploy_spec, deployment_id) apply to every notebook task.
 WIDGETS = {
     "deploy_spec": "{}",
     "deployment_id": "-1",
@@ -32,10 +32,6 @@ WIDGETS = {
     "app_sp": "",
     # This job RUN's id ({{job.run_id}}), recorded as run_id and used by on_failure to inspect tasks.
     "job_run_id": "",
-    # Source / format flags sent by the app (comma-separated types); blank -> derived from deploy_spec.
-    "artifact_sources": "",
-    "artifact_formats": "",
-    "eval_dataset_source": "",
 }
 
 PREPARE_TASK = "prepare"
@@ -112,6 +108,20 @@ class Ctx:
         except Exception as e:
             print(f"[tags] could not read deploy-job tags (endpoints get minimal tags): {e}")
             return {}
+
+    def use_experiment(self):
+        """Log MLflow runs to the deployment's experiment, creating its parent folder if missing
+        (e.g. the configured experiment base was never created or was deleted)."""
+        import os
+        import mlflow
+        mlflow.set_registry_uri("databricks-uc")
+        if not self.experiment:
+            return
+        try:
+            self.w.workspace.mkdirs(os.path.dirname(self.experiment.rstrip("/")))
+        except Exception as e:
+            print(f"[mlflow] could not create the experiment folder: {e}")
+        mlflow.set_experiment(self.experiment)
 
     # ---- values handed between tasks ----------------------------------------------------------
     def set_value(self, key, value):
@@ -257,19 +267,3 @@ class Ctx:
                 except Exception as ge:
                     print(f"[pg] grant skipped (app SP role may not exist yet): {ge}")
 
-
-def flag_set(ctx, name):
-    """Comma-separated type flag sent by the app -> a set of lower-case types."""
-    return {t.strip().lower() for t in ctx.params[name].split(",") if t.strip()}
-
-
-def resolve_types(ctx, flag_name, spec_types, what):
-    """The types to handle: the app's flag, or (blank flag) the types in deploy_spec. A type the spec
-    uses is never silently skipped, even if the flag omits it."""
-    flagged = flag_set(ctx, flag_name)
-    if not flagged:
-        return set(spec_types)
-    if not set(spec_types) <= flagged:
-        print(f"[flags] {flag_name}={sorted(flagged)} misses {sorted(set(spec_types) - flagged)} "
-              f"used by the {what} in deploy_spec; handling the union")
-    return flagged | set(spec_types)

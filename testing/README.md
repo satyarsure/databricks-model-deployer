@@ -48,8 +48,10 @@ path, an A/B traffic split, and two failure paths — every stage of
 > strings; every feature type is `double`, classifier outputs use `long`). For text / JSON / tensor
 > models, switch the **"Model contract"** selector to **Sample input / output** and paste a real
 > example instead of schemas (see **TC11**). Either way a signature is produced — UC requires one, so
-> you can't deploy with no contract. A **failed validation smoke test is non-fatal** (it's surfaced on
-> the lifecycle timeline and the deployment still proceeds to serving).
+> you can't deploy with no contract. Every model is tested in its own environment and again on the
+> live endpoint: with a **real sample input** a failure fails the deployment (and rolls the endpoint
+> back if it was already updated); with only a schema contract the test uses a **synthetic** row, and a
+> failure is just a warning on the timeline.
 >
 > **Tags** is a JSON object. Serving endpoints allow **at most 20 tags total** — your form Tags +
 > governance tags come first; if over 20, the auto-added `deployed_by`/`gpu_type`/`application` are
@@ -296,10 +298,14 @@ variant. Verify with the same `serving-endpoints get … | jq '.config.traffic_c
 
 ## TC5 — Validation FAILURE (schema mismatch) ⭐
 
-Deliberately declare **2** input features for a model trained on **4**. The pipeline fails the
-model validation — sklearn raises *"X has 2 features, but LinearRegression is expecting 4
-features as input"*. The row goes **Failed**, and the lifecycle timeline shows the failing stage
-with the error message.
+Give a **real sample** with **2** input features for a model trained on **4**. The *validate* step
+predicts on it in the model's own environment, sklearn raises *"X has 2 features, but
+LinearRegression is expecting 4 features as input"*, and the deployment stops before anything is
+served. The row goes **Failed** and the timeline ends on a red **FAILED** event at the *validator*
+stage.
+
+> With a **schema** contract and no sample, the same mismatch is only tested with a synthetic row,
+> which produces warnings rather than a failure — always give a real sample when you can.
 
 | field | value |
 |---|---|
@@ -311,20 +317,16 @@ with the error message.
 | Serverless usage policy | `<budget-policy-id>` |
 | Compute | CPU · SMALL |
 
-Input schema (intentionally wrong — only 2 of 4 features):
+Model contract: **Sample input / output** — intentionally wrong, only 2 of 4 features:
 ```json
-[
-  { "name": "sqft", "type": "double" },
-  { "name": "bedrooms", "type": "double" }
-]
+{"dataframe_records": [{"sqft": 2200, "bedrooms": 3}]}
 ```
-Output schema:
 ```json
-[ { "name": "price", "type": "double" } ]
+{"predictions": [450000.0]}
 ```
 
-**Expected:** status **Failed**; no endpoint created; the Deployed Models row shows the error, and
-the expanded lifecycle timeline ends on a red **FAILED** event carrying the sklearn feature-count
+**Expected:** status **Failed** at the *validator* stage; no endpoint created or changed; the row
+shows the error and the timeline ends on a red **FAILED** event carrying the sklearn feature-count
 message.
 
 ---
@@ -450,21 +452,20 @@ principals for a level in **one array** (a duplicated key like two `can_view` en
 Endpoint permissions (paste into the field):
 ```json
 {
-  "can_manage": ["greg.mara@databricks.com"],
-  "can_query": ["jeff.shmain@databricks.com"],
-  "can_view": ["usama.arif@databricks.com"]
+  "can_manage": ["<user-a>@<your-company>.com"],
+  "can_query": ["<a-group-name>"],
+  "can_view": ["<service-principal-application-id>"]
 }
 ```
 
-**Expected:** deployment completes; the endpoint's ACL contains greg → CAN_MANAGE, jeff → CAN_QUERY,
-usama → CAN_VIEW, plus **the deploying user → CAN_MANAGE** (added by default when not listed) and the
+**Expected:** deployment completes; the endpoint's ACL contains user-a → CAN_MANAGE, the group →
+CAN_QUERY, the service principal → CAN_VIEW, plus **the deploying user → CAN_MANAGE** (added by default when not listed) and the
 endpoint owner/creator → CAN_MANAGE. Applied as a merge (PATCH), so the owner and any existing grants
 are preserved; a permission failure is non-fatal (logged as a lifecycle note, deployment still completes).
 
 > **Honoring an explicit level for the submitter:** if you deploy *as* one of these users and list
 > that same user under `can_view`/`can_query`, the endpoint shows them at that level — the default
-> `CAN_MANAGE` applies only when the submitter isn't listed. (Verified: deploying as
-> `greg.mara@databricks.com` with greg under `can_view` yields greg → CAN_VIEW.)
+> `CAN_MANAGE` applies only when the submitter isn't listed.
 
 **Verify the ACL:**
 ```bash
@@ -531,9 +532,9 @@ Deploy an exported MLflow pyfunc folder as-is — e.g. the ClinicalBERT + SVM pr
 | Compute | CPU · MEDIUM · Scale-to-zero ON |
 
 **Expected:** *prepare* detects `mlflow_model`; *register* logs the folder as-is (timeline notes
-"added ipython to requirements" — its `python_model.pkl` references IPython); *validate_isolated*
-builds the model's own environment (torch / transformers — the slowest step) and predicts on the
-sample; *deploy_endpoint* → *smoke_test* calls the endpoint with the sample → **Complete**.
+"added ipython to requirements" — its `python_model.pkl` references IPython); *validate* builds the
+model's own environment (torch / transformers — the slowest step) and predicts on the sample;
+*deploy* updates the endpoint, calls it with the sample → **Complete**.
 
 ## TC13 — Code folder (model.py + artifacts) ⭐
 
@@ -562,14 +563,23 @@ text pipeline from TC11) into `…/test_artifacts/<fixture>/`, then deploy as a 
 | `code_text_clf/` | `protocol_text_clf.pkl` | two artifacts (model + `labels.json` mapping); text in / text out | **Sample** — `{"instances": ["Pregnancy Test", "EKG", "Biopsy"]}` → `{"predictions": ["Non-invasive procedure", …]}` |
 | `code_churn_ensemble/` | `models/churn_logreg.pkl`, `models/churn_rf.pkl` | a **folder artifact** (`context.artifacts["models"]` is a directory), a JSON config, and a helper module in `code/` (shipped via `code_paths`, imported inside `predict`) | Schema — `tenure, monthly_charges, total_charges` (double) → `churn` (long) |
 | `code_iris_proba/` | `iris_rf.pkl` | **multi-column output** (DataFrame); eval dataset scored in the model's own environment | Schema — 4 iris features (double) → `prediction` (long), `class_name` (string), `confidence` (double); eval `test_models/iris_eval.csv` |
+| `code_fails_when_served/` | `house_price_linreg.pkl` | **test-only**: validates, then fails once served — exercises the endpoint-test rollback (TC14) | Sample (see TC14) |
 | `code_no_model_py/` | any pickle | **negative**: a folder with no `model.py` / `MLmodel` | any — fails at *prepare*: "…is a folder but has neither an MLmodel file … nor a model.py" |
 
-## TC14 — Smoke-test failure rolls the endpoint back ⭐
+## TC14 — Endpoint-test failure rolls the endpoint back ⭐
 
-Deploy a **new version** of an already-deployed model with a **Sample** contract whose sample input
-the model can't accept (e.g. `{"instances": ["not", "numbers"]}` for the house-price regressor).
-**Expected:** *smoke_test* fails → timeline shows **rollback: restored the previous endpoint config**
-→ status **Failed**; the endpoint still serves the previous version and `@champion` doesn't move.
+A sample the model can't accept now fails earlier, in *validate* (before anything is served). To
+test the rollback itself you need a model that validates but fails once served — the test-only
+fixture `testing/fixtures/code_fails_when_served/` (plus `house_price_linreg.pkl`) does exactly
+that. Deploy it as a **new version** of an already-deployed model (e.g. `house_price_code` from
+TC13) as a **Code folder** with a **Sample** contract:
+
+- Sample input: `{"dataframe_records": [{"sqft": 2200, "bedrooms": 3, "bathrooms": 2, "age": 8}]}`
+- Sample output: `{"predictions": [450000.0]}`
+
+**Expected:** *validate* passes; *deploy* updates the endpoint, the endpoint test fails → timeline
+shows **rollback: endpoint test failed — restored the previous endpoint config** → status
+**Failed**; the endpoint still serves the previous version and `@champion` doesn't move.
 
 ## What to check in the UI (every case)
 
@@ -577,7 +587,7 @@ the model can't accept (e.g. `{"instances": ["not", "numbers"]}` for the house-p
   lifecycle event (the app server writes the initial record to Lakebase on submit — no cold-start
   gap). The row **auto-expands once** but stays collapsible via the chevron.
 - The **lifecycle timeline** streams live (amber "live" dot), advancing through
-  **prepare → wrapper → validator → deployer → smoke_test**, each with a status + timestamp; **Deploy Date** shows the full
+  **prepare → wrapper → validator → deployer**, each with a status + timestamp; **Deploy Date** shows the full
   date + time.
 - On success the **Status** badge turns green **Complete** and the **Serving → Open** link works.
 - On failure (TC5/TC6) the badge turns red **Failed**, the error shows under the badge, and the

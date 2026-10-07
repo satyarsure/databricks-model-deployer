@@ -1,13 +1,8 @@
-# Parameters every task receives (the app's run-now notebook_params — deploy_spec, deployment_id and
-# the *_sources / artifact_formats flags — override these for every notebook task in the run).
+# Parameters every task receives. The app's run-now notebook_params (deploy_spec, deployment_id)
+# override these for every notebook task in the run.
 x-deploy-params: &deploy_params
   deploy_spec: "{}"
   deployment_id: "-1"
-  # Distinct artifact source types (e.g. "s3,uc_volume") / formats (e.g. "file,mlflow_model") and the
-  # eval dataset's source type; sent by the app per run. Blank -> the job derives them from deploy_spec.
-  artifact_sources: ""
-  artifact_formats: ""
-  eval_dataset_source: ""
   catalog: ${var.catalog}
   schema: ${var.schema}
   # Default MLflow experiment (the form can override per deployment).
@@ -36,97 +31,53 @@ resources:
       budget_policy_id: ${var.budget_policy_id}
       tags: ${var.resource_tags}
 
-      # prepare -> register -> [validate_in_job | validate_isolated] -> deploy_endpoint -> smoke_test
-      # -> finalize, plus on_failure (records FAILED in Lakebase when any task fails). The condition
-      # tasks route validation by format: model files load in this job's environment; MLflow model
-      # folders / code folders are validated in their own environment. A repair run re-runs only the
-      # failed task and what follows it.
+      # Four steps in a straight line — each matches a stage on the app's timeline:
+      #   prepare (prepare) -> register (wrapper) -> validate (validator) -> deploy (deployer)
+      # plus on_failure, which records FAILED + the failed step's error when any step fails.
+      # See deploy-job/README.md. A repair run re-runs the failed step and those after it.
       #
-      # Retries: serverless auto-retries a failed task, and a bundle can't switch that off
-      # (`max_retries: 0` is dropped as a zero value). So every task is retry-safe instead:
-      # deploy_endpoint never records a config this run already applied as the "previous" one, and
-      # smoke_test refuses to run against an endpoint that no longer serves this run's versions
-      # (e.g. after its own rollback); register may leave an extra, unserved version.
+      # Retries: serverless auto-retries a failed task and a bundle can't switch that off
+      # (`max_retries: 0` is dropped as a zero value), so every step is safe to re-run.
       tasks:
         - task_key: prepare
           environment_key: locked
           notebook_task:
-            notebook_path: ../src/notebooks/01_prepare.py
+            notebook_path: ../src/notebooks/1_prepare.py
             base_parameters: *deploy_params
 
         - task_key: register
           depends_on: [{task_key: prepare}]
           environment_key: locked
           notebook_task:
-            notebook_path: ../src/notebooks/02_register.py
+            notebook_path: ../src/notebooks/2_register.py
             base_parameters: *deploy_params
 
-        - task_key: has_file_variants
+        - task_key: validate
           depends_on: [{task_key: register}]
-          condition_task:
-            op: EQUAL_TO
-            left: "{{tasks.prepare.values.has_file}}"
-            right: "true"
-
-        - task_key: validate_in_job
-          depends_on: [{task_key: has_file_variants, outcome: "true"}]
           environment_key: locked
-          notebook_task:
-            notebook_path: ../src/notebooks/03_validate_in_job.py
-            base_parameters: *deploy_params
-
-        - task_key: has_isolated_variants
-          depends_on: [{task_key: register}]
-          condition_task:
-            op: EQUAL_TO
-            left: "{{tasks.prepare.values.has_isolated}}"
-            right: "true"
-
-        - task_key: validate_isolated
-          depends_on: [{task_key: has_isolated_variants, outcome: "true"}]
-          environment_key: locked
-          # Builds the model's own environment (e.g. torch/transformers) — allow time for it.
+          # Builds each model's own environment (e.g. torch / transformers) — allow time for it.
           timeout_seconds: 5400
           notebook_task:
-            notebook_path: ../src/notebooks/04_validate_isolated.py
+            notebook_path: ../src/notebooks/3_validate.py
             base_parameters: *deploy_params
 
-        - task_key: deploy_endpoint
-          # Skipped validation tasks (condition false) don't block; a failed one does.
-          depends_on: [{task_key: validate_in_job}, {task_key: validate_isolated}]
-          run_if: NONE_FAILED
+        - task_key: deploy
+          depends_on: [{task_key: validate}]
           environment_key: locked
           notebook_task:
-            notebook_path: ../src/notebooks/05_deploy_endpoint.py
-            base_parameters: *deploy_params
-
-        - task_key: smoke_test
-          depends_on: [{task_key: deploy_endpoint}]
-          environment_key: locked
-          notebook_task:
-            notebook_path: ../src/notebooks/06_smoke_test.py
-            base_parameters: *deploy_params
-
-        - task_key: finalize
-          depends_on: [{task_key: smoke_test}]
-          environment_key: locked
-          notebook_task:
-            notebook_path: ../src/notebooks/07_finalize.py
+            notebook_path: ../src/notebooks/4_deploy.py
             base_parameters: *deploy_params
 
         - task_key: on_failure
           depends_on:
             - {task_key: prepare}
             - {task_key: register}
-            - {task_key: validate_in_job}
-            - {task_key: validate_isolated}
-            - {task_key: deploy_endpoint}
-            - {task_key: smoke_test}
-            - {task_key: finalize}
+            - {task_key: validate}
+            - {task_key: deploy}
           run_if: AT_LEAST_ONE_FAILED
           environment_key: locked
           notebook_task:
-            notebook_path: ../src/notebooks/99_on_failure.py
+            notebook_path: ../src/notebooks/9_on_failure.py
             base_parameters: *deploy_params
 
       # Reproducible dependency set for serverless compute. environment_version pins the Python

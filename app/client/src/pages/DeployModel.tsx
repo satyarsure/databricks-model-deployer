@@ -11,7 +11,7 @@ type ArtifactType = 's3' | 'uc_volume';
 const S3_URI = /^s3[an]?:\/\//i;
 const sourceTypeOf = (path: string): ArtifactType => (S3_URI.test(path.trim()) ? 's3' : 'uc_volume');
 type VariantSource = 'artifact' | 'existing';
-// What a new artifact IS — the deploy job handles each differently (see its FORMAT_HANDLERS).
+// What a new artifact IS — the deploy job registers each differently (artifacts.register_variant).
 type ArtifactFormat = 'file' | 'mlflow_model' | 'code_folder';
 const ARTIFACT_FORMAT_OPTIONS: { value: ArtifactFormat; label: string }[] = [
   { value: 'file', label: 'Model file' },
@@ -109,9 +109,9 @@ const PERM_KEYS = ['can_manage', 'can_query', 'can_view'] as const;
 
 // Placeholder / example for the optional serving-endpoint permissions field.
 const PERMISSIONS_PLACEHOLDER = `{
-  "can_manage": ["greg.mara@databricks.com"],
-  "can_query": ["jeff.shmain@databricks.com"],
-  "can_view": ["usama.arif@databricks.com"]
+  "can_manage": ["owner@example.com"],
+  "can_query": ["a-databricks-group"],
+  "can_view": ["9b1a2c3d-4e5f-6789-abcd-ef0123456789"]
 }`;
 
 type PermParse =
@@ -195,7 +195,7 @@ function parsePrefill(row: DeploymentRow | null): Prefill | null {
     // Restore a sample-defined contract so a new version prefills it and opens in sample mode.
     // Only set when the deployment actually used sample mode (else the form stays in schema mode).
     contractMode: row.contract_mode === 'model' ? 'model' : undefined,
-    // In 'model' mode the sample input is optional and only used to smoke-test the endpoint.
+    // In 'model' mode the sample input is optional and only used to test the model and the endpoint.
     sampleInputText:
       (row.contract_mode === 'sample' || row.contract_mode === 'model') && row.sample_input_json
         ? row.sample_input_json
@@ -534,7 +534,7 @@ export function DeployModel({
       return `A/B traffic must total 100% (currently ${trafficTotal}%).`;
     if (contractMode === 'model') {
       // The MLflow model folder brings its own signature; the sample input (optional) only feeds
-      // the endpoint smoke test.
+      // the model test (in its own environment) and the endpoint test.
       if (artifacts.some((a) => a.source === 'artifact' && (a.format ?? 'file') !== 'mlflow_model'))
         return "\"Use the model's own signature\" needs every new variant to be an MLflow model folder.";
       if (sampleInputText.trim()) {
@@ -912,7 +912,7 @@ export function DeployModel({
         {contractMode === 'model' ? (
           <Section
             title="Sample input"
-            hint={`Optional — a real request for the model, e.g. {"inputs": ["Pregnancy Test"]}. Used to validate the model in its own environment and to smoke-test the endpoint (a failure rolls the endpoint back). Leave blank to use the model's saved input example, if it has one.`}
+            hint={`Optional — a real request for the model, e.g. {"inputs": ["Pregnancy Test"]}. Used to test the model in its own environment and to test the live endpoint (an endpoint failure rolls it back). Leave blank to use the model's saved input example, if it has one.`}
           >
             <textarea
               className={`${inputCls} min-h-[96px] font-mono text-xs`}

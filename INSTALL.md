@@ -282,7 +282,7 @@ cd ..
 > the task notebooks — change `deploy-job/requirements.txt`.
 >
 > **Isolated validation needs package downloads.** For MLflow model folders and code folders, the
-> `validate_isolated` task builds the model's own environment with `uv` from its requirements (e.g.
+> `validate` step builds each model's own environment with `uv` from its requirements (e.g.
 > torch / transformers), so serverless compute must be able to reach PyPI (or the client's PyPI
 > mirror) and, when the model's Python version differs, download that Python build. Large models
 > can take tens of minutes the first time (the task's timeout is 90 minutes).
@@ -369,7 +369,7 @@ cd governance && databricks bundle deploy -t dev --profile <PROFILE> && cd ..
 databricks apps get  <APP_NAME> --profile <PROFILE> -o json   # active_deployment.status.state == SUCCEEDED; note `url`
 databricks apps logs <APP_NAME> --profile <OAUTH_PROFILE>     # build/runtime logs (OAuth only)
 ```
-Open the app `url`. Then run a smoke test end to end using **`testing/README.md`** (TC1): build the
+Open the app `url`. Then run an end-to-end test using **`testing/README.md`** (TC1): build the
 fixtures with `testing/setup_test_artifacts.py` (pass `<CATALOG>`/`<SCHEMA>`/`artifacts`), deploy the
 house-price model, and confirm the row reaches **Complete** with a live lifecycle timeline and the
 serving endpoint becomes READY. (Inspect Lakebase directly if needed:

@@ -7,7 +7,7 @@
 # with the same scikit-learn/numpy/pandas the job (and serving container) will load them with.
 # Full mlflow (not mlflow-skinny): the validator uses mlflow evaluate, which the skinny client
 # does not include. MLflow 3.x matches the MLflow models users export (MLmodel folders) and provides
-# models-from-code (the FileModel wrapper) and mlflow.models.predict(env_manager="uv").
+# models-from-code (the FileModel wrapper) and mlflow models predict --env-manager uv.
 mlflow[databricks]==3.16.1
 databricks-sdk==0.68.0
 # Postgres driver — the notebook writes deployment status + lifecycle to Lakebase (the app's
@@ -19,5 +19,5 @@ numpy==1.26.4
 scipy==1.13.1
 joblib==1.4.2
 cloudpickle==3.0.0
-# Builds a model's OWN environment for isolated validation (mlflow.models.predict env_manager="uv").
+# Builds each model's OWN environment in the validate step (mlflow models predict --env-manager uv).
 uv==0.9.5
