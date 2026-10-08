@@ -525,7 +525,7 @@ Deploy an exported MLflow pyfunc folder as-is — e.g. the ClinicalBERT + SVM pr
 | field | value |
 |---|---|
 | Model Name | `invasive-procedure-clf` |
-| Artifact | UC Volume · **MLflow model folder** · `/Volumes/<catalog>/<schema>/<volume>/test_artifacts/export_model/` |
+| Artifact | UC Volume · `/Volumes/<catalog>/<schema>/<volume>/test_artifacts/export_model/` |
 | **Model contract** | **Use the model's own signature** |
 | Sample input | `{"inputs": ["Pregnancy Test", "EKG", "Biopsy"]}` |
 | UC Model name | `<catalog>` · `<schema>` · `invasive_procedure_clf` |
@@ -544,7 +544,7 @@ Upload `testing/fixtures/code_model/` (`model.py`, `requirements.txt`) plus `hou
 | field | value |
 |---|---|
 | Model Name | `house-price-code` |
-| Artifact | UC Volume · **Code folder** · `/Volumes/<catalog>/<schema>/<volume>/test_artifacts/code_model/` |
+| Artifact | UC Volume · `/Volumes/<catalog>/<schema>/<volume>/test_artifacts/code_model/` |
 | **Model contract** | Columnar schema — input `sqft, bedrooms, bathrooms, age` (double), output `price` (double) |
 | UC Model name | `<catalog>` · `<schema>` · `house_price_code` |
 | Compute | CPU · SMALL · Scale-to-zero ON |
@@ -556,7 +556,7 @@ Upload `testing/fixtures/code_model/` (`model.py`, `requirements.txt`) plus `hou
 ### TC13b — more code-folder shapes (`testing/fixtures/`)
 
 Upload each fixture folder plus the pickles listed (all produced by `setup_test_artifacts.py`, or the
-text pipeline from TC11) into `…/test_artifacts/<fixture>/`, then deploy as a **Code folder**:
+text pipeline from TC11) into `…/test_artifacts/<fixture>/`, then deploy it (detected as a code folder):
 
 | Fixture | Add these files | Exercises | Contract |
 |---|---|---|---|
@@ -572,7 +572,7 @@ A sample the model can't accept now fails earlier, in *validate* (before anythin
 test the rollback itself you need a model that validates but fails once served — the test-only
 fixture `testing/fixtures/code_fails_when_served/` (plus `house_price_linreg.pkl`) does exactly
 that. Deploy it as a **new version** of an already-deployed model (e.g. `house_price_code` from
-TC13) as a **Code folder** with a **Sample** contract:
+TC13) with a **Sample** contract:
 
 - Sample input: `{"dataframe_records": [{"sqft": 2200, "bedrooms": 3, "bathrooms": 2, "age": 8}]}`
 - Sample output: `{"predictions": [450000.0]}`

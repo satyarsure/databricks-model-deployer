@@ -9,10 +9,6 @@ const PG_SCHEMA = process.env.PG_APP_SCHEMA || 'model_deployer';
 // Where an artifact (or the evaluation dataset) lives. To add one, extend this list, add the form
 // option (DeployModel.tsx), and add an `elif` in resolve_path() (deploy-job .../artifacts.py).
 const ARTIFACT_TYPES = ['s3', 'uc_volume'] as const;
-// What a new artifact IS: a single model file, a folder holding an exported MLflow model
-// (MLmodel), or a code folder (model.py + artifacts). The deploy job also detects it from the path.
-// To add one, extend this list + the form option, and detect_format() / register_variant().
-const ARTIFACT_FORMATS = ['file', 'mlflow_model', 'code_folder'] as const;
 // How the model's signature is defined: columnar schema, sample input/output, or the MLflow model
 // folder's own signature ('model').
 const CONTRACT_MODES = ['schema', 'sample', 'model'] as const;
@@ -33,8 +29,6 @@ const artifactSchema = z
     label: z.string().optional(),
     source: z.enum(['artifact', 'existing']).default('artifact'),
     type: z.enum(ARTIFACT_TYPES).optional(),
-    // Optional: blank -> the deploy job detects the format from what is at the path.
-    format: z.enum(ARTIFACT_FORMATS).optional(),
     path: z.string().optional(),
     version: z.union([z.number(), z.string()]).optional(),
     traffic_percent: z.number().min(0).max(100).optional(),
@@ -129,17 +123,11 @@ const deploySpecSchema = z.object({
   endpoint_name: z.string().optional(),
 }).superRefine((s, ctx) => {
   // UC requires a signature, so a contract must come from an output schema, a sample input +
-  // output, or (contract_mode 'model') the MLflow model folder itself.
+  // output, or (contract_mode 'model') the MLflow model folder itself. Whether each artifact really
+  // is an MLflow model folder is checked by the deploy job, which detects the format from the path.
   const hasSchema = s.output_schema.length > 0;
   const hasSample = s.sample_input.trim() !== '' && s.sample_output.trim() !== '';
-  if (resolveContractMode(s) === 'model') {
-    if (s.artifacts.some((a) => a.source !== 'existing' && a.format !== 'mlflow_model'))
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "contract_mode 'model' needs every new variant to be an MLflow model folder",
-        path: ['contract_mode'],
-      });
-  } else if (!hasSchema && !hasSample) {
+  if (resolveContractMode(s) !== 'model' && !hasSchema && !hasSample) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       message:

@@ -160,8 +160,9 @@ The **Experiment** and **Serverless usage policy** are also **required** Deploy-
 
 ## Artifact formats
 
-Each new-artifact variant declares **what** it is (the form's format selector, stored in
-`deploy_spec`); the job's *prepare* step also detects it from the path and fails on a mismatch.
+The user only gives the path; the job's *prepare* step detects **what** each new artifact is from
+it (a file → model file, a folder with `MLmodel` → MLflow model folder, a folder with `model.py` →
+code folder; any other folder fails) and records the detected format in the deployment row.
 
 | Format | What is at the path | How the job registers it |
 |---|---|---|

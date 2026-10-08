@@ -5,8 +5,8 @@
 # MAGIC 1. Record the deployment in Lakebase (the app's board shows it right away).
 # MAGIC 2. Resolve every artifact (and the evaluation dataset) to a readable `/Volumes` path —
 # MAGIC    S3 paths are read through the Unity Catalog external volume that covers them.
-# MAGIC 3. Detect each artifact's format (model file / MLflow model folder / code folder) and check it
-# MAGIC    matches what the user chose.
+# MAGIC 3. Detect each artifact's format from its path: a file = model file, a folder with `MLmodel` =
+# MAGIC    MLflow model folder, a folder with `model.py` = code folder (the user doesn't choose it).
 # MAGIC 4. Check a model signature will be available (Unity Catalog requires one).
 # MAGIC 5. Publish the resolved **plan** for the next steps.
 # MAGIC
@@ -77,11 +77,7 @@ form_has_signature = artifacts.form_signature(spec) is not None
 
 for i, a in enumerate(new_variants):
     label = a.get("label") or chr(ord("A") + i)
-    detected = artifacts.detect_format(a["path"])
-    chosen = (a.get("format") or "").lower()
-    if chosen and chosen != detected:
-        raise ValueError(f"variant {label}: you chose {chosen!r} but {a['path']} is a {detected!r}")
-    a["format"] = detected
+    detected = a["format"] = artifacts.detect_format(a["path"])
 
     if detected == "mlflow_model":
         if not artifacts.mlflow_folder_has_signature(a["path"]) and not form_has_signature:

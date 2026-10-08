@@ -14,8 +14,8 @@ Each step is one notebook in `src/notebooks/`, and each writes its own **stage**
 timeline:
 
 - **1_prepare** (stage `prepare`) — records the deployment in Lakebase; resolves every path to a
-  `/Volumes` path (S3 → its UC external volume); detects each artifact's format and checks it
-  matches what the user chose; checks a signature will be available; publishes the **plan**.
+  `/Volumes` path (S3 → its UC external volume); detects each artifact's format from its path
+  (the user doesn't choose it); checks a signature will be available; publishes the **plan**.
 - **2_register** (stage `wrapper`) — registers each new variant in Unity Catalog, by format:
   model file → `FileModel` wrapper; MLflow model folder → as-is; code folder → models-from-code.
   Existing versions (A/B champion) are referenced, not registered.
@@ -57,9 +57,9 @@ The deployment's status row and timeline live in Lakebase (`model_deployer.model
 - **Add a new artifact location** (e.g. a new storage type): add an `elif` in
   `artifacts.resolve_path()`; add the option to `ARTIFACT_TYPES` in `app/server/server.ts` and the
   form in `app/client/src/pages/DeployModel.tsx`.
-- **Add a new artifact format**: add detection in `artifacts.detect_format()`, an `elif` in
-  `artifacts.register_variant()` (+ its `_register_<format>()`), and the option in
-  `ARTIFACT_FORMATS` (server.ts) + the form.
+- **Add a new artifact format**: add detection in `artifacts.detect_format()` and an `elif` in
+  `artifacts.register_variant()` (+ its `_register_<format>()`). The app has no format choice (it is
+  always detected from the path) — just update the artifact hint text in `DeployModel.tsx`.
 - **Change package versions**: edit `requirements.txt` (never `%pip install` in a notebook), keep
   `testing/setup_test_artifacts.py` on the same core versions, and redeploy.
 - **Change endpoint tags / permissions / AI Gateway**: `serving.py` (`build_tags`,

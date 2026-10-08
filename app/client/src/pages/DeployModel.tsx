@@ -11,20 +11,9 @@ type ArtifactType = 's3' | 'uc_volume';
 const S3_URI = /^s3[an]?:\/\//i;
 const sourceTypeOf = (path: string): ArtifactType => (S3_URI.test(path.trim()) ? 's3' : 'uc_volume');
 type VariantSource = 'artifact' | 'existing';
-// What a new artifact IS — the deploy job registers each differently (artifacts.register_variant).
-type ArtifactFormat = 'file' | 'mlflow_model' | 'code_folder';
-const ARTIFACT_FORMAT_OPTIONS: { value: ArtifactFormat; label: string }[] = [
-  { value: 'file', label: 'Model file' },
-  { value: 'mlflow_model', label: 'MLflow model folder' },
-  { value: 'code_folder', label: 'Code folder' },
-];
-const FORMAT_HINTS: Record<ArtifactFormat, string> = {
-  file: 'A single pickle / joblib model file. Wrapped as an MLflow pyfunc using the contract below.',
-  mlflow_model:
-    'A folder holding an exported MLflow model (contains an MLmodel file) — e.g. exported from another workspace. Registered as-is with its own code, artifacts, signature and environment; validated in its own environment.',
-  code_folder:
-    'A folder with model.py (a PythonModel that calls mlflow.models.set_model(...)) plus its artifact files, and optionally requirements.txt. Every other file/folder is passed to load_context as context.artifacts["<name>"]. Keep heavy imports inside load_context / predict.',
-};
+// The deploy job detects what a new artifact is from the path (artifacts.detect_format).
+const ARTIFACT_HINT =
+  'Point at one of: a model file (.pkl / .joblib — wrapped as an MLflow pyfunc using the contract below); an exported MLflow model folder (contains an MLmodel file — registered as-is with its own code, signature and environment); or a code folder (model.py defining a PythonModel that calls mlflow.models.set_model(...), plus its artifact files and optionally requirements.txt). The deploy job detects which it is.';
 // How the signature is defined; 'model' = the MLflow model folder's own signature.
 type ContractMode = 'schema' | 'sample' | 'model';
 type Size = 'SMALL' | 'MEDIUM' | 'LARGE';
@@ -35,8 +24,6 @@ interface Artifact {
   // for a champion-vs-challenger A/B test).
   source: VariantSource;
   type: ArtifactType;
-  // Optional so drafts / rows saved before formats existed still load (treated as 'file').
-  format?: ArtifactFormat;
   path: string;
   version: string; // used when source === 'existing'
   traffic_percent: number;
@@ -164,7 +151,6 @@ function parsePrefill(row: DeploymentRow | null): Prefill | null {
       label?: string;
       source?: string;
       type?: string;
-      format?: string;
       path?: string;
       version?: number | string;
       traffic_percent?: number;
@@ -176,7 +162,6 @@ function parsePrefill(row: DeploymentRow | null): Prefill | null {
           label: a.label ?? String.fromCharCode(65 + i),
           source: a.source === 'existing' ? 'existing' : 'artifact',
           type: a.type === 's3' ? 's3' : 'uc_volume',
-          format: a.format === 'mlflow_model' || a.format === 'code_folder' ? a.format : 'file',
           path: a.path ?? '',
           version: a.version != null ? String(a.version) : '',
           traffic_percent: Number(a.traffic_percent ?? 0),
@@ -533,10 +518,8 @@ export function DeployModel({
     if (artifacts.length > 1 && trafficTotal !== 100)
       return `A/B traffic must total 100% (currently ${trafficTotal}%).`;
     if (contractMode === 'model') {
-      // The MLflow model folder brings its own signature; the sample input (optional) only feeds
-      // the model test (in its own environment) and the endpoint test.
-      if (artifacts.some((a) => a.source === 'artifact' && (a.format ?? 'file') !== 'mlflow_model'))
-        return "\"Use the model's own signature\" needs every new variant to be an MLflow model folder.";
+      // The MLflow model folder brings its own signature (the deploy job checks every new artifact
+      // is one); the sample input (optional) only feeds the model test and the endpoint test.
       if (sampleInputText.trim()) {
         try {
           JSON.parse(sampleInputText);
@@ -623,7 +606,6 @@ export function DeployModel({
                 label: a.label,
                 source: 'artifact' as const,
                 type: a.type,
-                format: a.format ?? 'file',
                 path: a.path.trim(),
                 traffic_percent: Number(a.traffic_percent) || 0,
               },
@@ -834,18 +816,13 @@ export function DeployModel({
                           { value: 'uc_volume', label: 'UC Volume' },
                         ]}
                       />
-                      <Segmented<ArtifactFormat>
-                        value={a.format ?? 'file'}
-                        onChange={(v) => setArtifact(i, { format: v })}
-                        options={ARTIFACT_FORMAT_OPTIONS}
-                      />
                     </div>
-                    <p className="mb-1 text-xs text-muted-foreground">{FORMAT_HINTS[a.format ?? 'file']}</p>
+                    <p className="mb-1 text-xs text-muted-foreground">{ARTIFACT_HINT}</p>
                     <input
                       className={inputCls}
                       placeholder={
                         (a.type === 's3' ? 's3://bucket/path/' : '/Volumes/catalog/schema/volume/') +
-                        ((a.format ?? 'file') === 'file' ? 'model.pkl' : 'model_folder/')
+                        'model.pkl  or  model_folder/'
                       }
                       value={a.path}
                       onChange={(e) => setArtifact(i, { path: e.target.value })}
@@ -905,8 +882,14 @@ export function DeployModel({
           >
             <option value="schema">Columnar schema (tabular models)</option>
             <option value="sample">Sample input / output (text, JSON, tensor)</option>
-            <option value="model">Use the model's own signature (MLflow model folders)</option>
+            <option value="model">Use the model's own signature (MLflow model folders only)</option>
           </select>
+          {contractMode === 'model' && (
+            <p className="mt-1 text-xs text-muted-foreground">
+              Only works when every new artifact is an MLflow model folder that has a signature. The
+              deploy job checks this first and fails at the prepare step otherwise.
+            </p>
+          )}
         </Section>
 
         {contractMode === 'model' ? (

@@ -12,7 +12,7 @@ exported MLflow model folder, or a code folder — describe its inputs and outpu
 and click **Deploy**. Behind the scenes a deployment job runs four steps:
 
 1. **Prepare** — checks your request, reads S3 paths through their Unity Catalog external volume,
-   and confirms each artifact is what you said it is (file / MLflow model folder / code folder).
+   and works out what each artifact is (model file / MLflow model folder / code folder).
 2. **Wrapper** — registers each artifact as a new version of your model in Unity Catalog, with a
    signature from your contract (or the MLflow model's own signature).
 3. **Validator** — tests every new version **in its own environment**, built from its own
@@ -68,7 +68,7 @@ time — because their environment is bigger.
 |---|---|---|
 | **Model Name** | Yes | A friendly name for the deployment (e.g. `house-price-regressor`). Shown on the board. |
 | **Description** | No | Free text describing the model. |
-| **Artifact** | Yes | **Where** it lives (UC Volume or S3) and **what** it is (Model file, MLflow model folder, or Code folder), plus the path — see section 6. For A/B tests you can add more than one, or reference an existing version. |
+| **Artifact** | Yes | **Where** it lives (UC Volume or S3) and the path. You don't say what it is (model file, MLflow model folder or code folder) — the deployment detects it; see section 6. For A/B tests you can add more than one, or reference an existing version. |
 | **Model contract** | Yes | How the model's inputs/outputs are described (section 7): **Columnar schema**, **Sample input / output**, or **Use the model's own signature** (MLflow model folders). |
 | **Input / Output schema** *(schema mode)* | — | JSON arrays of the model's columns (section 7). |
 | **Sample input / output** *(sample mode)* | — | A real request/response example, e.g. `{"instances": [...]}` / `{"predictions": [...]}` (section 7). |
@@ -135,9 +135,10 @@ mlflow.models.set_model(MyModel())
   of the file — the deployment reads `model.py` when registering it.
 - List your packages, with versions, in `requirements.txt`; they are used to test and serve the model.
 
-The format you pick is checked against what is actually at the path (a folder with `MLmodel` is an
-MLflow model folder, a folder with `model.py` is a code folder, a single file is a model file); a
-mismatch fails the deployment at the *prepare* step with a clear message.
+You don't choose the format — the deployment detects it from what is at the path: a single file is a
+model file, a folder with `MLmodel` is an MLflow model folder, a folder with `model.py` is a code
+folder. A folder with neither fails the deployment at the *prepare* step with a clear message, and
+the detected format is shown on the deployment's timeline.
 
 # 7. Defining the model contract
 
@@ -348,7 +349,7 @@ If a deployment turns **Failed**, expand the row's lifecycle timeline — the la
 
 | Step that failed | Common cause |
 |---|---|
-| **Prepare** | The path doesn't exist; an S3 path isn't covered by an external volume you can read; the format you chose doesn't match what's at the path (e.g. a folder with no `model.py` or `MLmodel`); or no signature is available (choose a Schema or Sample contract). |
+| **Prepare** | The path doesn't exist; an S3 path isn't covered by an external volume you can read; the path is a folder with no `model.py` or `MLmodel`; "Use the model's own signature" was chosen but an artifact isn't an MLflow model folder; or no signature is available (choose a Schema or Sample contract). |
 | **Wrapper** | The file isn't a loadable model (wrong path, not a pickle/joblib model, unpickling error), or the model couldn't be registered in Unity Catalog. |
 | **Validator** | The model couldn't load or predict on your sample input **in its own environment** (e.g. the sample doesn't match the model, a missing package in its requirements, or a bug in `model.py`). |
 | **Deployer** | The serving endpoint could not be created/updated (permissions, quota, or configuration) — or the live endpoint couldn't answer your **sample input**, in which case it is **rolled back** to its previous version (the timeline shows *rollback*), so callers keep getting the old model. |

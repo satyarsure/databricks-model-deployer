@@ -12,8 +12,8 @@ Sections (top to bottom):
 
 To add a new LOCATION: add an `elif` in resolve_path() and the option in the app
 (ARTIFACT_TYPES in app/server/server.ts + DeployModel.tsx).
-To add a new FORMAT: add detection in detect_format(), an `elif` in register_variant(), and the
-option in the app (ARTIFACT_FORMATS in server.ts + DeployModel.tsx).
+To add a new FORMAT: add detection in detect_format() and an `elif` in register_variant() (the app
+has no format choice — the format is always detected from the path; update its hint text only).
 """
 import json
 import os
